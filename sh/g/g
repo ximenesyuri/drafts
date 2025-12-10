@@ -1,0 +1,442 @@
+#! /bin/bash
+
+function g() {
+    case "$1" in
+    add)
+        shift
+        if [ -z "$1" ]; then
+            repo_root=$(git rev-parse --show-toplevel)
+            current_dir=$(pwd)
+            selected_files_relative=$(command git status --porcelain | awk '{print $2}' | \
+                                      fzf --multi --prompt="Add file to stage: " \
+                                          --height=40% --layout=reverse --border)
+            if [ -n "$selected_files_relative" ]; then
+                readarray -t selected_files_relative_array <<< "$selected_files_relative"
+                files_to_add=()
+                for file in "${selected_files_relative_array[@]}"; do
+                    abs_from_root="$repo_root/$file"
+                    rel_from_cwd=$(realpath --relative-to="$current_dir" "$abs_from_root" 2>/dev/null)
+                    if [ -z "$rel_from_cwd" ] || [ ! -e "$rel_from_cwd" ]; then
+                        echo "Warning: '$file' does not exist here, skipping."
+                        continue
+                    fi
+                    files_to_add+=("$rel_from_cwd")
+                done
+                if [ "${#files_to_add[@]}" -eq 0 ]; then
+                    echo "No selected files exist to add."
+                    return 1
+                fi
+                if command git add "${files_to_add[@]}"; then
+                    echo "Files added to stage:"
+                    for file in "${files_to_add[@]}"; do
+                        if [ -d "$file" ]; then
+                            echo "- $file*"
+                        else
+                            echo "- $file"
+                        fi
+                    done
+                else
+                    echo "Error adding selected files to the staging area." >&2
+                fi
+            fi
+        elif [[ "$1" == "." ]]; then
+            command git add .
+            echo "All modified files in "$PWD" added to stage."
+        elif [ "$1" == "all" ]; then
+            pushd $(command git rev-parse --show-toplevel || pwd) > /dev/null
+            if command git add .; then
+                echo "All modified files added to stage."
+            else
+                echo "Error adding all changes to the staging area." >&2
+            fi
+            popd > /dev/null
+        else
+            if command git add "$@"; then
+                echo "Files added to stage:"
+                for i in "$@"; do
+                    if [ -d "$i" ]; then
+                        echo "- $i/*"
+                    elif [ -f "$i" ]; then
+                        echo "- $i"
+                    fi
+                done
+            else
+                echo "Error adding specified files to the staging area." >&2
+            fi
+        fi
+        ;;
+    clean|restore)
+        shift
+        command git restore "$*"
+        ;;
+    back|undo)
+        command git reset --hard HEAD~${2:-1}
+        ;;
+    fix)
+        if [ -z "$2" ]; then
+            command git commit -m "fix: minor fixing"
+        else
+            shift
+            message="$*"
+            command git commit -m "fix: $message"
+        fi
+        ;;
+    feat|doc|conf|chore|ci|ref|notes|libs|test)
+        type="$1"; shift
+        message="$*"
+        command git commit -m "$type: $message"
+        ;; 
+    info) command git log -1 --oneline; command git status ;; 
+    branch)
+        shift; sub="$1"
+        if [[ -z "$sub" ]]; then
+            command git branch
+            return 
+        fi
+        case "$sub" in 
+            new)
+                if [ -n "$2" ]; then
+                    command git checkout -b "$2"
+                else
+                    echo "Error: Branch name required. Usage: git branch new <branch-name>"
+                    return 1
+                fi
+                ;;
+            list|ls)
+                command git branch -a
+                ;;
+            rm)
+                if [ -z "$2" ]; then
+                    selected=$(command git branch --format="%(refname:short)" | \
+                        fzf --multi --prompt="Branch to delete: " --height=30%)
+                    [ -n "$selected" ] && \
+                        for branch in $selected; do command git branch -D "$branch"; done
+                else
+                    command git branch -D "$2"
+                fi
+                ;;
+            send)
+                branch_to_push="${2:-HEAD}"
+                command git push origin "${branch_to_push}"
+                ;;
+            *)
+                if command git show-ref --verify --quiet "refs/heads/$sub"; then
+                   command  git checkout "$sub"
+                else
+                    shift
+                    command git branch "$*" 
+                fi
+                ;; 
+        esac
+        ;;
+    tag|tags)
+        shift; sub="$1"
+        case "$sub" in
+            new)
+                tagtype="$2"; msg="$3"
+                if [ -z "$tagtype" ]; then
+                    echo "Error: Missing tag type (patch, minor, or major)."
+                    return 1
+                fi
+                latest_tag=$(git describe --tags --abbrev=0 2>/dev/null)
+                if [ -z "$latest_tag" ]; then
+                    new_tag="v0.1.0"
+                else
+                    IFS='.' read major minor patch <<< "${latest_tag#v}"
+                    case "$tagtype" in
+                        patch) patch=$((patch + 1));;
+                        minor) minor=$((minor + 1)); patch=0;;
+                        major) major=$((major + 1)); minor=0; patch=0;;
+                        *)
+                            echo "Invalid tag type: $tagtype. Use patch, minor, or major." && return 1;;
+                    esac
+                    new_tag="v$major.$minor.$patch"
+                fi
+                if [ -n "$msg" ]; then
+                    command git tag "$new_tag" -m "$msg"
+                else
+                    command git tag "$new_tag"
+                fi
+                echo "Created new tag: $new_tag"
+                ;;
+            list|ls) command git tag --sort=-creatordate -n ;;
+            rm)
+                if [ -z "$2" ]; then
+                    selected=$(git tag --sort=-creatordate -l | \
+                        fzf --multi --prompt="Tag to delete: " --height=30%)
+                    [ -n "$selected" ] && \
+                        for tag in $selected; do command git tag -d "$tag"; done
+                else
+                    command git tag -d "$2"
+                fi
+                ;;
+            send)
+                latest_tag=$(git describe --tags --abbrev=0 2>/dev/null)
+                [ -z "$latest_tag" ] && { echo "Error: No tags found to push."; return 1; }
+                command git push origin "$latest_tag"
+                ;;
+            *) command git tag "$*" ;;
+        esac
+        ;;
+    stage|staged)
+        shift; sub="$1"
+        case "$sub" in
+            add)
+                selected=$(git status --porcelain | \
+                    awk '{if ($1 ~ /^[MARCU?]/) print $2}' | \
+                    fzf --multi --prompt="Add file to stage: " --height=30%)
+                [ -n "$selected" ] && command git add $selected
+                ;;
+            list|ls)
+                command git diff --cached --name-only
+                ;;
+            rm)
+                if [ -z "$2" ]; then
+                    repo_root=$(git rev-parse --show-toplevel)
+                    current_dir=$(pwd)
+                    staged=$(git diff --cached --name-only | \
+                        fzf --multi --prompt="Unstage file: " --height=30%)
+                    if [ -n "$staged" ]; then
+                        readarray -t files_to_unstage <<< "$staged"
+                        files_for_reset=()
+                        for file in "${files_to_unstage[@]}"; do
+                            abs_from_root="$repo_root/$file"
+                            rel_from_cwd=$(realpath --relative-to="$current_dir" "$abs_from_root" 2>/dev/null)
+                            if [ -n "$rel_from_cwd" ] && [ -e "$rel_from_cwd" ]; then
+                                files_for_reset+=("$rel_from_cwd")
+                            else
+                                files_for_reset+=("$file")
+                            fi
+                        done
+                        if [ "${#files_for_reset[@]}" -eq 0 ]; then
+                            echo "No selected files exist to unstage."
+                            return 1
+                        fi
+                        if git reset HEAD -- "${files_for_reset[@]}" > /dev/null; then
+                            echo "Unstaged files:"
+                            for f in "${files_to_unstage[@]}"; do
+                                echo "- $f"
+                            done
+                        else
+                            echo "Error unstaging files." >&2
+                        fi
+                    fi
+                else
+                    if git reset HEAD "$@" > /dev/null; then
+                        echo "Unstaged files:"
+                        for f in "$@"; do
+                            echo "- $f"
+                        done
+                    else
+                        echo "Error unstaging files." >&2
+                    fi
+                fi
+                ;; 
+            *)
+                echo "Usage: g stage add/list/rm"
+                ;; 
+        esac
+        ;; 
+    new)
+        msg=""
+        if [ -z "$2" ]; then
+            read -e -p "Commit message: " msg
+        else
+            shift
+            msg="$*"
+        fi
+        [ -z "$msg" ] && { echo "No message provided."; return 1; }
+        command git commit -m "$msg"
+        ;;
+    list|ls)
+        command git log --oneline --decorate --graph -n ${2:-10}
+        ;;
+    rm)
+        base_commit=$(git log --oneline | \
+            fzf --multi --prompt="Select commits to delete (oldest to newest): " --height=50% | \
+            awk '{print $1}' | head -n1 )
+        [ -z "$base_commit" ] && { echo "No commit selected."; return 1; }
+        command git rebase -i "$base_commit^"
+        echo "# In the rebase editor, change 'pick' to 'drop' for unwanted commits."
+        ;;
+    rename)
+        shift
+        git commit --amend -m "$*"
+        ;;
+    send)
+        if [ -z "$2" ]; then
+            git push origin HEAD
+        else
+            git push origin "$2"
+        fi
+        ;;
+    force)
+        if [ -z "$2" ]; then
+            git push origin HEAD --force
+        else
+            git push origin --force "$2"
+        fi
+        ;;
+    rebase)
+        num="${2:-10}"
+        if [[ "$num" =~ ^[1-9][0-9]*$ ]]; then
+            command git rebase -i HEAD~"$num"
+        else
+            command git pull origin "$2" --rebase
+        fi
+        ;;
+    ff)
+        command git pull origin "$2" --ff
+        ;;
+    continue) command git rebase --continue ;;
+    abort) command git rebase --abort ;;
+    .)
+        branches=$(command git branch --format="%(refname:short)")
+        if [[ -z "$2" ]]; then
+            g info
+            return
+        fi
+        for branch in $branches; do
+            if [[ "$2" == "$branch" ]]; then
+                g branch $branch
+                return
+            fi
+        done
+        if [ -f "$2" ] || [ -d "$2" ]; then
+            g add "$2"
+            return
+        fi
+        g branch new "$2"
+        ;;
+    ,.|.,)
+        g ls $2
+        ;;
+    ..)
+        shift 1
+        git difftool -t vimdiff -y "$@"
+        ;;
+    *)        
+        command git "$@"
+        ;;
+    esac
+}
+
+_g_completion() {
+    local cur prev_word
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev_word="${COMP_WORDS[COMP_CWORD-1]}"
+
+    local top_level_commands="add clean undo fix feat doc conf chore ci ref test info branch tag stage new list rm rename send force rebase ff continue abort . .. ,. ., commit"
+
+    local branch_subcommands="new list rm send"
+
+    local tag_subcommands="new list rm send"
+    local tag_new_types="patch minor major"
+
+    local stage_subcommands="add list rm"
+
+    case "${COMP_CWORD}" in
+        1)
+            COMPREPLY=( $(compgen -W "${top_level_commands}" -- "${cur}") )
+            ;;
+        2)
+            case "${prev_word}" in
+                add)
+                    COMPREPLY=( $(compgen -f -d -W ". all" -- "${cur}") )
+                    ;;
+                clean|restore|ff|push|pull)
+                    if [[ "${prev_word}" == "ff" || "${prev_word}" == "push" || "${prev_word}" == "pull" ]]; then
+                        local remote_branches=$(git branch -r | sed 's/origin\///g' | grep -v 'HEAD')
+                        COMPREPLY=( $(compgen -W "${remote_branches}" -- "${cur}") )
+                    fi
+                    COMPREPLY+=( $(compgen -f -d -- "${cur}") )
+                    ;;
+                back|undo)
+                    COMPREPLY=( $(compgen -W "1 2 3 4 5" -- "${cur}") )
+                    ;;
+                branch)
+                    local existing_branches=$(git branch --format="%(refname:short)")
+                    COMPREPLY=( $(compgen -W "${branch_subcommands} ${existing_branches}" -- "${cur}") )
+                    ;;
+                tag|tags)
+                    COMPREPLY=( $(compgen -W "${tag_subcommands}" -- "${cur}") )
+                    ;;
+                stage|staged)
+                    COMPREPLY=( $(compgen -W "${stage_subcommands}" -- "${cur}") )
+                    ;;
+                ls|list)
+                    COMPREPLY=( $(compgen -W "10 20 30" -- "${cur}") )
+                    ;;
+                rm)
+                    COMPREPLY=( $(compgen -f -d -- "${cur}") )
+                    ;;
+                rebase)
+                    local remote_branches=$(git branch -r | sed 's/origin\///g' | grep -v 'HEAD')
+                    COMPREPLY=( $(compgen -W "1 2 3 4 5 ${remote_branches}" -- "${cur}") )
+                    ;;
+                .|..)
+                    local existing_branches=$(git branch --format="%(refname:short)")
+                    COMPREPLY=( $(compgen -f -d -W "${existing_branches}" -- "${cur}") )
+                    ;;
+                force)
+                    local remote_branches=$(git branch -r | sed 's/origin\///g' | grep -v 'HEAD')
+                    COMPREPLY=( $(compgen -W "${remote_branches}" -- "${cur}") )
+                    ;;
+                *)
+                    ;;
+            esac
+            ;;
+        3)
+            local grand_prev_word="${COMP_WORDS[COMP_CWORD-2]}"
+            case "${grand_prev_word}" in
+                branch)
+                    case "${prev_word}" in
+                        new)
+                            ;;
+                        rm|send)
+                            # For 'g branch rm' or 'g branch send', suggest local branches
+                            local local_branches=$(git branch --format="%(refname:short)")
+                            COMPREPLY=( $(compgen -W "${local_branches}" -- "${cur}") )
+                            ;;
+                    esac
+                    ;;
+                tag|tags)
+                    case "${prev_word}" in
+                        new)
+                            COMPREPLY=( $(compgen -W "${tag_new_types}" -- "${cur}") )
+                            ;;
+                        rm|send)
+                            local existing_tags=$(git tag -l)
+                            COMPREPLY=( $(compgen -W "${existing_tags}" -- "${cur}") )
+                            ;;
+                    esac
+                    ;;
+                stage|staged)
+                    case "${prev_word}" in
+                        add|rm)
+                            if [[ "${prev_word}" == "add" ]]; then
+                                local unstaged_files=$(git status --porcelain | awk '{if ($1 !~ /^[MARCU?]/) print $2}')
+                                COMPREPLY=( $(compgen -f -d -W "${unstaged_files}" -- "${cur}") )
+                            fi
+                            if [[ "${prev_word}" == "rm" ]]; then
+                                local staged_files=$(git diff --cached --name-only)
+                                COMPREPLY=( $(compgen -f -d -W "${staged_files}" -- "${cur}") )
+                            fi
+                            ;;
+                    esac
+                    ;;
+            esac
+            ;;
+        *)
+            case "${COMP_WORDS[1]}" in
+                add|clean|restore|.)
+                    COMPREPLY=( $(compgen -f -d -- "${cur}") )
+                    ;;
+                *)
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+complete -F _g_completion g
