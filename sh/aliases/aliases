@@ -1,0 +1,41 @@
+#!/bin/bash
+
+alias rm="rm -r"
+alias md="mkdir -p"
+alias mf="touch"
+alias ls="ls --color=auto --group-directories-first"
+alias la="ls -a"
+alias shutdown="shutdown -h now"
+alias restart="xrdb $HOME/.Xresources"
+alias rst="restart"
+alias pt="setxkbmap -model abnt2 -layout br -variant abnt2"
+alias en="setxkbmap -layout us -variant intl"
+alias src="source $HOME/.bashrc"
+
+function cp(){
+    if [[ ${#@} -eq 0 ]]; then
+        xclip -selection clipboard
+    elif [[ ${#@} -eq 1 ]]; then
+        if [[ -f "$1" ]]; then
+            cat "$1" | xclip -selection clipboard
+        fi
+    else
+        command cp -r "$@"
+    fi
+}
+
+function bc(){
+    echo "Welcome to bc calculator. Type \"quit\" to exit."
+    command bc -q -i -l $@
+}
+
+function random(){
+    var=$(tr -dc A-Za-z0-9 </dev/urandom | head -c $1)
+    echo $var | xclip -selection clipboard
+}
+
+function localhost(){
+    ${BROWSER:-firefox} localhost:$1/$2 & disown
+}
+
+alias lh="localhost"
