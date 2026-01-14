@@ -1,41 +1,212 @@
 #!/bin/bash
 
-MFA_SECRETS_FILE="$HOME/sec/mfa.txt"
+_mfa_help() {
+    cat <<'EOF'
+Usage: mfa [--file FILE] <command> [options]
 
-touch "$MFA_SECRETS_FILE"
+Commands:
+    new: creates a new entry
+        new <name> <otpauth_url>
+        new --name <name> --url <otpauth_url>
+        new --name <name> --service <service> --user <user> --secret <secret>
+        new --name <name> --service <service> --secret <secret>
+
+    rm: removes existing entry
+        rm <name>
+        rm --name <name>
+
+    list: list registered entries
+
+    <name>: provide code for registered entry
+
+Globals:
+    --file <file>: Path to the secrets file.
+    --help:        Show this help message and exit.
+
+Environment:
+    MFA_SECRETS_FILE: set secrets file globally.
+EOF
+}
 
 mfa() {
+    for arg in "$@"; do
+        case "$arg" in
+            --help|-h)
+                _mfa_help
+                return 0
+                ;;
+        esac
+    done
+
+    local file=""
+    local secrets_from_cli=0
+    local -a remaining_args=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --file)
+                if [[ $# -lt 2 ]]; then
+                    echo "error: --file requires a path argument." >&2
+                    return 1
+                fi
+                file="$2"
+                secrets_from_cli=1
+                shift 2
+                ;;
+            *)
+                remaining_args+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    if [[ $secrets_from_cli -eq 1 ]]; then
+        if [[ ! -e "$file" ]]; then
+            mkdir -p "$(dirname "$file")" 2>/dev/null || {
+                echo "error: cannot create directory for secrets file '$file'." >&2
+                return 1
+            }
+            touch "$file" 2>/dev/null || {
+                echo "error: cannot create secrets file '$file'." >&2
+                return 1
+            }
+        fi
+    else
+        file="${MFA_SECRETS_FILE:-}"
+        if [[ -z "$file" ]]; then
+            echo "error: secrets file not specified." >&2
+            echo "info : use --file <file> or set MFA_SECRETS_FILE." >&2
+            return 1
+        fi
+        if [[ ! -f "$file" ]]; then
+            echo "error: secrets file '$file' does not exist." >&2
+            return 1
+        fi
+    fi
+
+    local MFA_SECRETS_FILE="$file"
+
     if ! command -v oathtool &> /dev/null; then
-        echo "error: missing oathtool."
-        echo "info: try sudo apt-get install oathtool"
+        echo "error: missing oathtool." >&2
+        echo "info : try sudo apt-get install oathtool" >&2
         return 1
     fi
 
-    local subcommand="$1"
+    local subcommand="${remaining_args[0]:-}"
+    local -a sub_args=()
+    if [[ ${#remaining_args[@]} -gt 0 ]]; then
+        sub_args=("${remaining_args[@]:1}")
+    fi
 
     case "$subcommand" in
-        add)
-            local name="$2"
-            local url="$3"
+        new)
+            local name=""
+            local url=""
+            local service=""
+            local user=""
+            local secret_val=""
+            local -a positional=()
+            local j=0
 
-            if [[ "$#" -ne 3 || -z "$name" || -z "$url" ]]; then
-                echo "usage: mfa add <name> <otpauth_url>"
+            while [[ $j -lt ${#sub_args[@]} ]]; do
+                local a="${sub_args[j]}"
+                case "$a" in
+                    --name)
+                        ((j++))
+                        if [[ $j -ge ${#sub_args[@]} ]]; then
+                            echo "error: --name requires a value." >&2
+                            return 1
+                        fi
+                        name="${sub_args[j]}"
+                        ;;
+                    --url)
+                        ((j++))
+                        if [[ $j -ge ${#sub_args[@]} ]]; then
+                            echo "error: --url requires a value." >&2
+                            return 1
+                        fi
+                        url="${sub_args[j]}"
+                        ;;
+                    --service)
+                        ((j++))
+                        if [[ $j -ge ${#sub_args[@]} ]]; then
+                            echo "error: --service requires a value." >&2
+                            return 1
+                        fi
+                        service="${sub_args[j]}"
+                        ;;
+                    --user)
+                        ((j++))
+                        if [[ $j -ge ${#sub_args[@]} ]]; then
+                            echo "error: --user requires a value." >&2
+                            return 1
+                        fi
+                        user="${sub_args[j]}"
+                        ;;
+                    --secret)
+                        ((j++))
+                        if [[ $j -ge ${#sub_args[@]} ]]; then
+                            echo "error: --secret requires a value." >&2
+                            return 1
+                        fi
+                        secret_val="${sub_args[j]}"
+                        ;;
+                    --*)
+                        echo "error: unknown option for 'new': $a" >&2
+                        return 1
+                        ;;
+                    *)
+                        positional+=("$a")
+                        ;;
+                esac
+                ((j++))
+            done
+
+            if [[ -z "$name" && ${#positional[@]} -ge 1 ]]; then
+                name="${positional[0]}"
+            fi
+            if [[ -z "$url" && ${#positional[@]} -ge 2 ]]; then
+                url="${positional[1]}"
+            fi
+
+            if [[ -n "$url" ]]; then
+                if [[ -n "$service" || -n "$user" || -n "$secret_val" ]]; then
+                    echo "error: specify either --url or (--service/--user/--secret), not both." >&2
+                    return 1
+                fi
+            else
+                if [[ -n "$service" || -n "$user" || -n "$secret_val" ]]; then
+                    if [[ -z "$service" || -z "$secret_val" ]]; then
+                        echo "error: --service and --secret are required when not using --url." >&2
+                        return 1
+                    fi
+                    local label="$service"
+                    [[ -n "$user" ]] && label="$service:$user"
+                    url="otpauth://totp/$label?secret=$secret_val&issuer=$service&digits=6&period=30"
+                fi
+            fi
+
+            if [[ -z "$name" || -z "$url" ]]; then
+                echo "usage: mfa new <name> <otpauth_url>" >&2
+                echo "   or: mfa new --name <name> --url <otpauth_url>" >&2
+                echo "   or: mfa new --name <name> --service <service> --user <user> --secret <secret>" >&2
+                echo "   or: mfa new --name <name> --service <service> --secret <secret>" >&2
                 return 1
             fi
 
             local secret
             local type
-            
+
             secret=$(echo "$url" | sed -n 's/.*secret=\([^&]*\).*/\1/p')
             type=$(echo "$url" | sed -n 's/otpauth:\/\/\([^\/]*\).*/\1/p')
 
             if [[ -z "$secret" || -z "$type" ]]; then
-                echo "error: Invalid otpauth URL. Could not extract secret or type."
+                echo "error: invalid otpauth URL. Could not extract secret or type." >&2
                 return 1
             fi
 
             if grep -q "^$name:" "$MFA_SECRETS_FILE"; then
-                echo "error: entry '$name' already exists."
+                echo "error: entry '$name' already exists." >&2
                 return 1
             fi
 
@@ -44,59 +215,220 @@ mfa() {
             ;;
 
         rm)
-            local name="$2"
+            local name=""
+            local -a positional_rm=()
+            local k=0
+
+            while [[ $k -lt ${#sub_args[@]} ]]; do
+                local a="${sub_args[k]}"
+                case "$a" in
+                    --name)
+                        ((k++))
+                        if [[ $k -ge ${#sub_args[@]} ]]; then
+                            echo "error: --name requires a value." >&2
+                            return 1
+                        fi
+                        name="${sub_args[k]}"
+                        ;;
+                    --*)
+                        echo "error: unknown option for 'rm': $a" >&2
+                        return 1
+                        ;;
+                    *)
+                        positional_rm+=("$a")
+                        ;;
+                esac
+                ((k++))
+            done
+
+            if [[ -z "$name" && ${#positional_rm[@]} -ge 1 ]]; then
+                name="${positional_rm[0]}"
+            fi
+
             if [[ -z "$name" ]]; then
-                echo "Usage: mfa rm <name>"
+                echo "usage: mfa rm <name>" >&2
+                echo "   or: mfa rm --name <name>" >&2
                 return 1
             fi
+
             if ! grep -q "^$name:" "$MFA_SECRETS_FILE"; then
-                echo "Error: No entry found for '$name'."
+                echo "error: no entry found for '$name'." >&2
                 return 1
             fi
 
             sed -i "/^$name:/d" "$MFA_SECRETS_FILE"
-            echo "Successfully removed '$name'."
+            echo "done: removed '$name'."
             ;;
 
         list)
             echo "Registered MFA entries:"
-            cut -d':' -f1 "$MFA_SECRETS_FILE" | while read -r entry; do
-                echo "- $entry"
-            done
+            if [[ -s "$MFA_SECRETS_FILE" ]]; then
+                cut -d':' -f1 "$MFA_SECRETS_FILE" | while read -r entry; do
+                    [[ -n "$entry" ]] && echo "- $entry"
+                done
+            else
+                echo "(none)"
+            fi
             ;;
 
         "")
             echo "Current OTP codes:"
             while IFS=: read -r entry_name type secret; do
+                [[ -z "$entry_name" ]] && continue
                 local otp_code
                 if [[ "$type" == "totp" ]]; then
                     otp_code=$(oathtool --totp -b "$secret")
                     echo "- $entry_name (TOTP): $otp_code"
                 elif [[ "$type" == "hotp" ]]; then
-                    echo "Warning: Cannot generate HOTP for '$entry_name'. HOTP requires a counter."
+                    echo "warning: cannot generate HOTP for '$entry_name'. HOTP requires a counter."
                 fi
             done < "$MFA_SECRETS_FILE"
             ;;
 
         *)
-            local entry=$(grep "^$subcommand:" "$MFA_SECRETS_FILE")
+            local entry
+            entry=$(grep "^$subcommand:" "$MFA_SECRETS_FILE" || true)
             if [[ -z "$entry" ]]; then
-                echo "error: No entry found for '$subcommand'."
-                echo "Use 'mfa list' to see all entries."
+                echo "error: no entry found for '$subcommand'." >&2
+                echo "info : use 'mfa list' to see all entries." >&2
                 return 1
             fi
 
             local name type secret
             IFS=: read -r name type secret <<< "$entry"
-            
+
             if [[ "$type" == "totp" ]]; then
-                local otp_code=$(oathtool --totp -b "$secret")
-                echo "$otp_code" | xclip -selection clipboard
+                local otp_code
+                otp_code=$(oathtool --totp -b "$secret")
+
+                if command -v xclip &> /dev/null; then
+                    echo "$otp_code" | xclip -selection clipboard
+                    echo "OTP for '$name' copied to clipboard."
+                else
+                    echo "$otp_code"
+                fi
             elif [[ "$type" == "hotp" ]]; then
-                echo "error: Cannot generate HOTP for '$name'. HOTP requires a counter."
+                echo "error: cannot generate HOTP for '$name'. HOTP requires a counter." >&2
                 return 1
             fi
             ;;
     esac
 }
+
+_mfa_completion_get_file() {
+    local i
+    for (( i=1; i<${#COMP_WORDS[@]}; i++ )); do
+        if [[ "${COMP_WORDS[i]}" == "--file" ]]; then
+            (( i++ ))
+            [[ $i -lt ${#COMP_WORDS[@]} ]] && { echo "${COMP_WORDS[i]}"; return; }
+        fi
+    done
+    if [[ -n "$MFA_SECRETS_FILE" ]]; then
+        echo "$MFA_SECRETS_FILE"
+    fi
+}
+
+_mfa_completion_list_names() {
+    local file
+    file="$(_mfa_completion_get_file)"
+    [[ -n "$file" && -f "$file" ]] || return
+    cut -d':' -f1 "$file" 2>/dev/null
+}
+
+_mfa_completion() {
+    local cur prev
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    if [[ "$prev" == "--file" ]]; then
+        COMPREPLY=( $(compgen -f -- "$cur") )
+        return
+    fi
+
+    local -a names=()
+    while IFS= read -r n; do
+        [[ -n "$n" ]] && names+=("$n")
+    done < <(_mfa_completion_list_names 2>/dev/null)
+
+    local first_nonopt=""
+    local i=1
+    while [[ $i -lt ${#COMP_WORDS[@]} ]]; do
+        local w="${COMP_WORDS[i]}"
+        if [[ "$w" == "--file" ]]; then
+            (( i+=2 ))
+            continue
+        fi
+        if [[ "$w" == -* ]]; then
+            (( i++ ))
+            continue
+        fi
+        first_nonopt="$w"
+        break
+    done
+
+    if [[ $COMP_CWORD -eq 1 || -z "$first_nonopt" ]]; then
+        local words="new rm list --file"
+        COMPREPLY=( $(compgen -W "$words ${names[*]}" -- "$cur") )
+        return
+    fi
+
+    case "$first_nonopt" in
+        new)
+            local all_opts=(--name --url --service --user --secret --file)
+
+            local used_url=0
+            local used_parts=0
+
+            for w in "${COMP_WORDS[@]}"; do
+                case "$w" in
+                    --url)
+                        used_url=1
+                        ;;
+                    --service|--user|--secret)
+                        used_parts=1
+                        ;;
+                esac
+            done
+
+            local -a candidates=()
+            local opt
+            for opt in "${all_opts[@]}"; do
+                local already_used=0
+                for w in "${COMP_WORDS[@]}"; do
+                    if [[ "$w" == "$opt" ]]; then
+                        already_used=1
+                        break
+                    fi
+                done
+                [[ $already_used -eq 1 ]] && continue
+
+                if [[ $used_url -eq 1 && "$opt" =~ ^(--service|--user|--secret)$ ]]; then
+                    continue
+                fi
+                if [[ $used_parts -eq 1 && "$opt" == "--url" ]]; then
+                    continue
+                fi
+
+                candidates+=("$opt")
+            done
+
+            COMPREPLY=( $(compgen -W "${candidates[*]}" -- "$cur") )
+            ;;
+        rm)
+            local opts="--file ${names[*]}"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            ;;
+        list)
+            local opts="--file"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            ;;
+        *)
+            local opts="--file ${names[*]}"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            ;;
+    esac
+}
+
+complete -F _mfa_completion mfa
 

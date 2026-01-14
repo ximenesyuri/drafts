@@ -1,6 +1,6 @@
 #! /bin/bash
 
-function get_monitors(){
+function _mon_get_monitors(){
     has_xrandr=$(which xrandr)
     if [[ -z "$has_xrandr" ]]; then
         echo "error: xrandr not found in \$PATH."
@@ -38,7 +38,7 @@ function get_monitors(){
     fi
 }
 
-function get_sink(){
+function _mon_get_sink(){
     has_yq=$(which jq)
     if [[ -z "$has_yq" ]]; then
         echo "error: jq not found in \$PATH."
@@ -68,12 +68,12 @@ function get_sink(){
     fi
 }
 
-function core(){
-    get_monitors
+function _mon_core(){
+    _mon_get_monitors
     if [[ "$?" == "1" ]]; then
         return 1
     fi
-    get_sink
+    _mon_get_sink
     if [[ "$?" == "1" ]]; then
         return 1
     fi
@@ -98,7 +98,7 @@ function mon() {
         fi
     elif [[ "$1" == "right" ]] ||
          [[ "$1" == "left" ]]; then
-        core "$@"
+        _mon_core "$@"
         if [[ "$?" == "1" ]]; then
             return 1
         fi
@@ -107,9 +107,3 @@ function mon() {
         return 1
     fi
 }
-
-mon "$@"
-
-unset -f get_monitors
-unset -f get_sink
-unset -f core
