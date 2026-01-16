@@ -1,0 +1,307 @@
+#!/bin/bash
+
+if [[ $- == *i* ]]; then
+
+  __ML_MODE=0
+  __ML_PREFIX="  > "
+  __ML_PLEN=${#__ML_PREFIX}
+
+  __ml_set_normal_keys() {
+    bind '"\C-m": accept-line'
+    bind '"\e[A": previous-history'
+    bind '"\e[B": next-history'
+    bind '"\e": prefix-meta'
+
+    # restore normal arrows + backspace/delete
+    bind '"\e[D": backward-char'
+    bind '"\eOD": backward-char'
+    bind '"\e[C": forward-char'
+    bind '"\eOC": forward-char'
+    bind '"\C-h": backward-delete-char'
+    bind '"\C-?": backward-delete-char'
+    bind '"\C-d": delete-char'
+    bind '"\e[3~": delete-char'
+  }
+
+  # ---- helpers on current line ----
+
+  __ml_current_line_bounds() {
+    # computes __ml_line_start, __ml_line_end for position $1 or READLINE_POINT
+    local buf=$READLINE_LINE
+    local pos=${1:-$READLINE_POINT}
+    local len=${#buf}
+    local i last_nl=-1
+    for ((i=0; i<pos; i++)); do
+      [[ ${buf:i:1} == $'\n' ]] && last_nl=$i
+    done
+    __ml_line_start=$(( last_nl + 1 ))
+    local nl=-1
+    for ((i=__ml_line_start; i<len; i++)); do
+      if [[ ${buf:i:1} == $'\n' ]]; then
+        nl=$i
+        break
+      fi
+    done
+    __ml_line_end=$(( nl == -1 ? len : nl ))
+  }
+
+  __ml_line_is_prefixed() {
+    # returns 0 if this line (start at $1) has the "  > " prefix and is NOT the first line
+    local start=$1
+    if (( start == 0 )); then
+      return 1
+    fi
+    [[ ${READLINE_LINE:start:__ML_PLEN} == "$__ML_PREFIX" ]]
+  }
+
+  # ---- core editing primitives ----
+
+  __ml_newline() {
+    [[ $__ML_MODE -eq 1 ]] || return
+    local insert=$'\n'"$__ML_PREFIX"
+    local before=${READLINE_LINE:0:READLINE_POINT}
+    local after=${READLINE_LINE:READLINE_POINT}
+    READLINE_LINE="${before}${insert}${after}"
+    (( READLINE_POINT += ${#insert} ))
+  }
+
+  __ml_up() {
+    [[ $__ML_MODE -eq 1 ]] || return
+    local buf=$READLINE_LINE pos=$READLINE_POINT len=${#buf}
+
+    # current line start and column
+    local i last_nl=-1
+    for ((i=0; i<pos; i++)); do
+      [[ ${buf:i:1} == $'\n' ]] && last_nl=$i
+    done
+    local cur_start=$(( last_nl + 1 ))
+    local col=$(( pos - cur_start ))
+
+    (( last_nl == -1 )) && return  # already at first line
+
+    # previous line start
+    local prev_nl=-1
+    for ((i=0; i<last_nl; i++)); do
+      [[ ${buf:i:1} == $'\n' ]] && prev_nl=$i
+    done
+    local prev_start=$(( prev_nl + 1 ))
+
+    # previous line end
+    local next_nl=-1
+    for ((i=prev_start; i<len; i++)); do
+      if [[ ${buf:i:1} == $'\n' ]]; then
+        next_nl=$i
+        break
+      fi
+    done
+    local prev_end=$(( next_nl == -1 ? len : next_nl ))
+
+    local new_pos=$(( prev_start + col ))
+
+    if __ml_line_is_prefixed "$prev_start"; then
+      local min_pos=$(( prev_start + __ML_PLEN ))
+      (( new_pos < min_pos )) && new_pos=$min_pos
+    fi
+    (( new_pos > prev_end )) && new_pos=$prev_end
+    READLINE_POINT=$new_pos
+  }
+
+  __ml_down() {
+    [[ $__ML_MODE -eq 1 ]] || return
+    local buf=$READLINE_LINE pos=$READLINE_POINT len=${#buf}
+
+    # current line start and column
+    local i last_nl=-1
+    for ((i=0; i<pos; i++)); do
+      [[ ${buf:i:1} == $'\n' ]] && last_nl=$i
+    done
+    local cur_start=$(( last_nl + 1 ))
+    local col=$(( pos - cur_start ))
+
+    # find next line start
+    local nl=-1
+    for ((i=pos; i<len; i++)); do
+      if [[ ${buf:i:1} == $'\n' ]]; then
+        nl=$i
+        break
+      fi
+    done
+    (( nl == -1 )) && return  # already last line
+
+    local next_start=$(( nl + 1 ))
+
+    # next line end
+    local next_nl=-1
+    for ((i=next_start; i<len; i++)); do
+      if [[ ${buf:i:1} == $'\n' ]]; then
+        next_nl=$i
+        break
+      fi
+    done
+    local next_end=$(( next_nl == -1 ? len : next_nl ))
+
+    local new_pos=$(( next_start + col ))
+
+    if __ml_line_is_prefixed "$next_start"; then
+      local min_pos=$(( next_start + __ML_PLEN ))
+      (( new_pos < min_pos )) && new_pos=$min_pos
+    fi
+    (( new_pos > next_end )) && new_pos=$next_end
+    READLINE_POINT=$new_pos
+  }
+
+  __ml_backspace() {
+    [[ $__ML_MODE -eq 1 ]] || return
+    local buf=$READLINE_LINE pos=$READLINE_POINT
+    (( pos == 0 )) && return
+
+    __ml_current_line_bounds "$pos"
+    local line_start=$__ml_line_start
+    local col=$(( pos - line_start ))
+
+    if __ml_line_is_prefixed "$line_start"; then
+      (( col <= __ML_PLEN )) && return
+    fi
+
+    local before=${buf:0:pos-1}
+    local after=${buf:pos}
+    READLINE_LINE="${before}${after}"
+    READLINE_POINT=$((pos-1))
+  }
+
+  __ml_delete() {
+    [[ $__ML_MODE -eq 1 ]] || return
+    local buf=$READLINE_LINE pos=$READLINE_POINT len=${#buf}
+    (( pos >= len )) && return
+
+    __ml_current_line_bounds "$pos"
+    local line_start=$__ml_line_start
+    local col=$(( pos - line_start ))
+
+    if __ml_line_is_prefixed "$line_start"; then
+      (( col < __ML_PLEN )) && return
+    fi
+
+    local before=${buf:0:pos}
+    local after=${buf:pos+1}
+    READLINE_LINE="${before}${after}"
+  }
+
+  __ml_left() {
+    [[ $__ML_MODE -eq 1 ]] || return
+    local buf=$READLINE_LINE pos=$READLINE_POINT
+    (( pos == 0 )) && return
+
+    local new_pos=$((pos-1))
+    __ml_current_line_bounds "$new_pos"
+    local line_start=$__ml_line_start
+    local col=$(( new_pos - line_start ))
+
+    if __ml_line_is_prefixed "$line_start"; then
+      local min_pos=$(( line_start + __ML_PLEN ))
+      (( new_pos < min_pos )) && new_pos=$min_pos
+    fi
+
+    READLINE_POINT=$new_pos
+  }
+
+  __ml_set_multiline_keys() {
+    bind -x '"\C-m": __ml_newline'   # Enter: newline with "  > "
+    bind -x '"\e[A": __ml_up'        # Up: prev line
+    bind -x '"\e[B": __ml_down'      # Down: next line
+
+    bind -x '"\C-h": __ml_backspace' # Backspace
+    bind -x '"\C-?": __ml_backspace'
+    bind -x '"\C-d": __ml_delete'    # Delete
+    bind -x '"\e[3~": __ml_delete'
+
+    bind -x '"\e[D": __ml_left'      # Left: stay out of prefix
+    bind -x '"\eOD": __ml_left'
+    # Right is left as normal forward-char
+
+    bind -x '"\e": __ml_escape'
+  }
+
+  # ---- join & execute / escape ----
+
+  __ml_strip_prefixes_and_join() {
+    local code=$1
+    code=${code#"${__ML_PREFIX}"}             # first line if prefixed
+    code=${code//$'\n'"${__ML_PREFIX}"/ }     # other lines
+    code=${code//$'\n'/ }                     # any stray newlines
+    printf '%s' "$code"
+  }
+
+  __ml_escape() {
+    if [[ $__ML_MODE -eq 1 ]]; then
+      local code
+      code=$(__ml_strip_prefixes_and_join "$READLINE_LINE")
+      READLINE_LINE=$code
+      READLINE_POINT=${#READLINE_LINE}
+      __ML_MODE=0
+      __ml_set_normal_keys
+    fi
+  }
+
+    __ml_exec_and_exit() {
+    # Turn multiline + "  > " prefixes into a single command line
+    local code
+    code=$(__ml_strip_prefixes_and_join "$READLINE_LINE")
+
+    # Expand PS1 as a real prompt string
+    local prompt="${PS1@P}"
+
+    if [[ -n $code ]]; then
+      # Print a newline, then the prompt + the command (like normal mode),
+      # then run the command.
+      printf '\n%s%s\n' "$prompt" "$code"
+      builtin eval "$code"
+    else
+      # If nothing to run, just move to a new line
+      printf '\n'
+    fi
+
+    READLINE_LINE=''
+    READLINE_POINT=0
+    __ML_MODE=0
+    __ml_set_normal_keys
+  }
+
+
+  # ---- mode toggles ----
+
+  __ml_ctrl_bracket() {
+    if [[ $__ML_MODE -eq 0 ]]; then
+      __ML_MODE=1
+      __ml_set_multiline_keys
+      READLINE_POINT=${#READLINE_LINE}
+      __ml_newline                 # first "  > " line
+    else
+      __ml_exec_and_exit
+    fi
+  }
+
+__ml_prompt_hook() {
+    if [[ $__ML_MODE -eq 1 ]]; then
+      __ML_MODE=0
+      __ml_set_normal_keys
+    fi
+    # Run any original PROMPT_COMMAND the user had
+    if [[ -n "$__ML_OLD_PROMPT_COMMAND" ]]; then
+      eval "$__ML_OLD_PROMPT_COMMAND"
+    fi
+  }
+
+  # Install our prompt hook, preserving any existing PROMPT_COMMAND
+  if [[ -n "$PROMPT_COMMAND" && "$PROMPT_COMMAND" != *"__ml_prompt_hook"* ]]; then
+    __ML_OLD_PROMPT_COMMAND=$PROMPT_COMMAND
+    PROMPT_COMMAND="__ml_prompt_hook"
+  elif [[ -z "$PROMPT_COMMAND" ]]; then
+    PROMPT_COMMAND="__ml_prompt_hook"
+  fi
+ 
+  __ml_set_normal_keys
+  bind -x '"\C-]": __ml_ctrl_bracket'
+
+fi
+

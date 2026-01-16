@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+# mdp-lite: a pure-bash markdown presentation tool with simple code highlighting
+# Usage:  ./test.sh slides.md
+
+set -u
+
+# ---------- Config ----------
+SLIDE_HEIGHT=24      # fixed slide height (suggested: 18–24 for typical terminals)
+MAX_TEXT_WIDTH=120   # max width for non-code text
+
+# ---------- Colors & styles ----------
+RESET=$'\e[0m'
+BOLD=$'\e[1m'
+DIM=$'\e[2m'
+
+FG_BLACK=$'\e[30m'
+FG_RED=$'\e[31m'
+FG_GREEN=$'\e[32m'
+FG_YELLOW=$'\e[33m'
+FG_BLUE=$'\e[34m'
+FG_MAGENTA=$'\e[35m'
+FG_CYAN=$'\e[36m'
+FG_WHITE=$'\e[37m'
+
+# ---------- Helpers ----------
+
+die() {
+    printf 'Error: %s\n' "$*" >&2
+    exit 1
+}
+
+[[ $# -lt 1 ]] && die "Usage: $0 file.md"
+INPUT=$1
+[[ -r "$INPUT" ]] || die "Cannot read '$INPUT'"
+
+# Restore terminal on exit
+cleanup() {
+    tput cnorm 2>/dev/null || true
+    tput sgr0 2>/dev/null || true
+    stty echo 2>/dev/null || true
+}
+trap cleanup EXIT
+
+tput civis 2>/dev/null || true
+
+# ---------- Parse slides (split on line '---') ----------
+slides=()
+current_slide=''
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == '---' ]]; then
+        slides+=("$current_slide")
+        current_slide=''
+    else
+        current_slide+="$line"$'\n'
+    fi
+done < "$INPUT"
+
+# Add last slide if any
+if [[ -n "$current_slide" ]]; then
+    slides+=("$current_slide")
+fi
+
+TOTAL_SLIDES=${#slides[@]}
+(( TOTAL_SLIDES > 0 )) || die "No slides found (need at least one, separated by '---' lines)."
+
+# ---------- Code highlighting functions ----------
+
+highlight_bash() {
+    local line=$1
+
+    # Comments: # ...
+    if [[ "$line" == *"#"* ]]; then
+        local before=${line%%#*}
+        local comment=${line#*#}
+        line="${before}${FG_GREEN}#${comment}${RESET}"
+    fi
+
+    # Keywords
+    line=$(sed -E \
+        's/\b(if|then|else|elif|fi|for|while|do|done|case|esac|function|in)\b/'"$FG_BLUE"'\1'"$RESET"'/g' \
+        <<< "$line")
+
+    printf '%b\n' "$line"
+}
+
+highlight_python() {
+    local line=$1
+
+    # Comments: # ...
+    if [[ "$line" == *"#"* ]]; then
+        local before=${line%%#*}
+        local comment=${line#*#}
+        line="${before}${FG_GREEN}#${comment}${RESET}"
+    fi
+
+    # Keywords
+    line=$(sed -E \
+        's/\b(def|class|if|elif|else|while|for|in|return|import|from|as|try|except|finally|with|yield|True|False|None)\b/'"$FG_BLUE"'\1'"$RESET"'/g' \
+        <<< "$line")
+
+    printf '%b\n' "$line"
+}
+
+highlight_js() {
+    local line=$1
+
+    # Line comments: //
+    if [[ "$line" == *"//"* ]]; then
+        local before=${line%%//*}
+        local comment=${line#*//}
+        line="${before}${FG_GREEN}//${comment}${RESET}"
+    fi
+
+    # Keywords
+    line=$(sed -E \
+        's/\b(function|const|let|var|if|else|return|for|while|class|import|export|from|new)\b/'"$FG_BLUE"'\1'"$RESET"'/g' \
+        <<< "$line")
+
+    printf '%b\n' "$line"
+}
+
+highlight_plain() {
+    local line=$1
+    printf '%b\n' "${DIM}${line}${RESET}"
+}
+
+highlight_code() {
+    local lang=$1
+    local line=$2
+
+    # Normalize simple aliases
+    case "$lang" in
+        sh)          lang="bash" ;;
+        py)          lang="python" ;;
+        js|mjs|cjs)  lang="javascript" ;;
+    esac
+
+    case "$lang" in
+        bash)       highlight_bash "$line" ;;
+        python)     highlight_python "$line" ;;
+        javascript) highlight_js "$line" ;;
+        *)          highlight_plain "$line" ;;
+    esac
+}
+
+# ---------- Text wrapping (non-code only) ----------
+
+wrap_text() {
+    # Usage: wrap_text "text" width
+    local text=$1
+    local width=$2
+    local len
+
+    if [[ -z "$text" ]]; then
+        printf '\n'
+        return
+    fi
+
+    while :; do
+        len=${#text}
+        if (( len <= width )); then
+            printf '%s\n' "$text"
+            break
+        else
+            printf '%s\n' "${text:0:width}"
+            text=${text:width}
+        fi
+    done
+}
+
+# ---------- Slide rendering with fixed height & centering ----------
+
+render_slide() {
+    local idx=$1
+    local content=${slides[$idx]}
+
+    local in_code=0
+    local lang=''
+    local line
+
+    # Build all rendered content lines (no footer) into an array
+    local -a rendered_lines=()
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Fence line: ```lang
+        if [[ "$line" == \`\`\`* ]]; then
+            if (( in_code == 0 )); then
+                in_code=1
+                lang=${line#\`\`\`}
+                lang=${lang%%[[:space:]]*}
+                continue
+            else
+                in_code=0
+                lang=''
+                continue
+            fi
+        fi
+
+        if (( in_code )); then
+            # Code: highlight, no wrapping
+            rendered_lines+=( "$(highlight_code "$lang" "$line")" )
+        else
+            # Non-code
+
+            # Blank line
+            if [[ -z "$line" ]]; then
+                rendered_lines+=( "" )
+                continue
+            fi
+
+            # Horizontal rule
+            if [[ "$line" =~ ^---+$ ]]; then
+                rendered_lines+=( "${DIM}------------------------------${RESET}" )
+                continue
+            fi
+
+            local type text width
+            if [[ "$line" == '### '* ]]; then
+                type="h3"
+                text=${line#\#\#\# }
+            elif [[ "$line" == '## '* ]]; then
+                type="h2"
+                text=${line#\#\# }
+            elif [[ "$line" == '# '* ]]; then
+                type="h1"
+                text=${line#\# }
+            elif [[ "$line" == "- "* || "$line" == "* "* ]]; then
+                type="bullet"
+                text=${line:2}
+            else
+                type="plain"
+                text=$line
+            fi
+
+            if [[ "$type" == "bullet" ]]; then
+                # leave room for "  • "
+                width=$(( MAX_TEXT_WIDTH - 3 ))
+                (( width <= 0 )) && width=10
+            else
+                width=$MAX_TEXT_WIDTH
+            fi
+
+            while IFS= read -r seg; do
+                case "$type" in
+                    h1)     rendered_lines+=( "${BOLD}${FG_CYAN}${seg}${RESET}" ) ;;
+                    h2)     rendered_lines+=( "${BOLD}${FG_BLUE}${seg}${RESET}" ) ;;
+                    h3)     rendered_lines+=( "${BOLD}${FG_MAGENTA}${seg}${RESET}" ) ;;
+                    bullet) rendered_lines+=( "  • ${seg}" ) ;;
+                    plain)  rendered_lines+=( "$seg" ) ;;
+                esac
+            done < <(wrap_text "$text" "$width")
+        fi
+    done <<< "$content"
+
+    # Terminal dimensions
+    local rows cols
+    rows=$(tput lines 2>/dev/null || echo 24)
+    cols=$(tput cols 2>/dev/null || echo 80)
+
+    # Slide area height (fixed, but not taller than terminal)
+    local slide_height=$SLIDE_HEIGHT
+    (( slide_height > rows )) && slide_height=$rows
+    (( slide_height < 2 )) && slide_height=2   # need at least 1 content + 1 help line
+
+    local visible_content_height=$(( slide_height - 1 ))  # last line = help line
+    local content_height=${#rendered_lines[@]}
+
+    # How many lines we can actually show
+    local visible_lines=$content_height
+    (( visible_lines > visible_content_height )) && visible_lines=$visible_content_height
+
+    # Vertical centering within the slide area
+    local content_top_pad=$(( (visible_content_height - visible_lines) / 2 ))
+    (( content_top_pad < 0 )) && content_top_pad=0
+
+    # Center slide area in screen vertically
+    local top_pad=$(( (rows - slide_height) / 2 ))
+    (( top_pad < 0 )) && top_pad=0
+
+    # Horizontal centering into MAX_TEXT_WIDTH region
+    local usable_width=$MAX_TEXT_WIDTH
+    (( usable_width > cols )) && usable_width=$cols
+    local left_pad=$(( (cols - usable_width) / 2 ))
+    (( left_pad < 0 )) && left_pad=0
+
+    tput clear
+    tput cup 0 0
+
+    local i
+    for ((i = 0; i < top_pad; i++)); do
+        printf '\n'
+    done
+
+    local padding=""
+    if (( left_pad > 0 )); then
+        padding=$(printf '%*s' "$left_pad" '')
+    fi
+
+    # Print slide content area (slide_height - 1 lines)
+    local idx_line=0
+    for ((i = 0; i < visible_content_height; i++)); do
+        if (( i < content_top_pad || i >= content_top_pad + visible_lines )); then
+            # Empty line (just padding)
+            printf '%s\n' "$padding"
+        else
+            local src_index=$(( i - content_top_pad ))
+            if (( src_index < content_height )); then
+                printf '%s%b\n' "$padding" "${rendered_lines[$src_index]}"
+            else
+                printf '%s\n' "$padding"
+            fi
+        fi
+    done
+
+    # Bottom help line (fixed at bottom-left of slide), slide counter bottom-right
+    local slide_no=$(( idx + 1 ))
+    local help_text="h: prev | l/SPACE/ENTER: next | q: quit"
+    local slide_text="[${slide_no}/${TOTAL_SLIDES}]"
+
+    local len_help=${#help_text}
+    local len_slide=${#slide_text}
+    local spaces_between=$(( usable_width - len_help - len_slide ))
+    (( spaces_between < 1 )) && spaces_between=1
+
+    printf '%s%b' "$padding" "$DIM"
+    printf '%s' "$help_text"
+    printf '%*s' "$spaces_between" ''
+    printf '%s' "$slide_text"
+    printf '%b\n' "$RESET"
+}
+
+# ---------- Keyboard handling ----------
+
+read_key() {
+    local key rest
+    IFS= read -rsn1 key || return 1
+    # Handle escape sequences (arrows)
+    if [[ "$key" == $'\e' ]]; then
+        if IFS= read -rsn2 -t 0.001 rest 2>/dev/null; then
+            key+="$rest"
+        fi
+    fi
+    printf '%s' "$key"
+}
+
+# ---------- Main loop ----------
+
+idx=0
+
+while :; do
+    render_slide "$idx"
+
+    key=$(read_key) || break
+
+    case "$key" in
+        q) break ;;
+        $'\e[C'|l|' '|$'\n')        # Right arrow / l / Space / Enter
+            if (( idx < TOTAL_SLIDES - 1 )); then
+                ((idx++))
+            fi
+            ;;
+        $'\e[D'|h)                  # Left arrow / h
+            if (( idx > 0 )); then
+                ((idx--))
+            fi
+            ;;
+        [0-9])                      # Jump to slide (1-9)
+            local_num=$((key - 1))
+            if (( local_num >= 0 && local_num < TOTAL_SLIDES )); then
+                idx=$local_num
+            fi
+            ;;
+        *) : ;;
+    esac
+done
+

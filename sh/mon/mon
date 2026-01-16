@@ -1,16 +1,30 @@
 #! /bin/bash
 
-function mon() {
-    function get_monitors(){
-        has_xrandr=$(which xrandr)
-        if [[ -z "$has_xrandr" ]]; then
-            echo "error: xrandr not found in \$PATH."
-            return 1
-        fi
-        monitors=($(xrandr --listmonitors | awk '{print $2}' | sed 's/*//g' | sed 's/+//g'))
-        number_of_monitors="${#monitors[@]}"
-        if [[ $number_of_monitors -le 1 ]]; then
-            echo "error: could not found any monitor."
+function _mon_get_monitors(){
+    has_xrandr=$(which xrandr)
+    if [[ -z "$has_xrandr" ]]; then
+        echo "error: xrandr not found in \$PATH."
+        return 1
+    fi
+    monitors=($(xrandr --listmonitors | awk '{print $2}' | sed 's/*//g' | sed 's/+//g'))
+    number_of_monitors="${#monitors[@]}"
+    if [[ $number_of_monitors -le 1 ]]; then
+        echo "error: could not found any monitor."
+        return 1
+    else
+        HDMI=()
+        for ((i=0; i<number_of_monitors; i++)); do
+            has_HDMI=($(echo "${monitors[$i]}" | grep -i HDMI))
+            if [[ -n "$has_HDMI" ]]; then
+                HDMI+=("$has_HDMI")
+            fi
+        done
+        if [[ ${#HDMI[@]} -eq 0 ]]; then
+            main_monitor=${monitors[1]}
+            HDMI="HDMI-1" 
+        elif [[ ${#HDMI[@]} -gt 1 ]]; then
+            echo "error: there are multiples HDMI connections."
+            echo "Be sure to have a single HDMI connection."
             return 1
         else
             HDMI=()
@@ -39,11 +53,28 @@ function mon() {
         fi
     }
 
-    function get_sink(){
-        has_yq=$(which jq)
-        if [[ -z "$has_yq" ]]; then
-            echo "error: jq not found in \$PATH."
-            return 1
+function _mon_get_sink(){
+    has_yq=$(which jq)
+    if [[ -z "$has_yq" ]]; then
+        echo "error: jq not found in \$PATH."
+        return 1
+    fi
+    has_pactl=$(which pactl)
+    if [[ -z "$has_yq" ]]; then
+        echo "error: pactl not found in \$PATH."
+        return 1
+    fi
+    number_of_sinks=$(pactl --format=json list sinks | jq 'length') 
+    for ((i=0; i<number_of_sinks; i++)); do
+        ports=$(pactl --format=json list sinks | jq ".[$i].ports")
+        has_speaker=$(echo "$ports" | grep -i "speaker" )
+        has_headphone=$(echo "$ports" | grep -i "headphone" )
+        if [[ -n "$has_speaker" ]] &&
+           [[ -n "$has_headphone" ]]; then
+            sink=$(pactl --format=json list sinks | jq ".[$i].name" | sed 's/"//g')
+            break
+        else
+            continue
         fi
         has_pactl=$(which pactl)
         if [[ -z "$has_yq" ]]; then
@@ -69,22 +100,24 @@ function mon() {
         fi
     }
 
-    function core(){
-        get_monitors
-        if [[ "$?" == "1" ]]; then
-            return 1
-        fi
-        get_sink
-        if [[ "$?" == "1" ]]; then
-            return 1
-        fi
-        if [[ -n "$2" ]]; then
-            echo "error: expected a single argument."
-            return 1
-        fi
-        eval "xrandr --output $main_monitor --auto --output $HDMI --auto --${1}-of $main_monitor"
-        pactl set-default-sink $sink
-    }
+function _mon_core(){
+    _mon_get_monitors
+    if [[ "$?" == "1" ]]; then
+        return 1
+    fi
+    _mon_get_sink
+    if [[ "$?" == "1" ]]; then
+        return 1
+    fi
+    if [[ -n "$2" ]]; then
+        echo "error: expected a single argument."
+        return 1
+    fi
+    eval "xrandr --output $main_monitor --auto --output $HDMI --auto --${1}-of $main_monitor"
+    pactl set-default-sink $sink
+}
+
+function mon() {
     if [[ -z "$1" ]]; then
         if [[ -z "${MONITOR_POSITION}" ]]; then
         echo "error: env MONITOR_POSITION was not defined."
@@ -97,7 +130,7 @@ function mon() {
         fi
     elif [[ "$1" == "right" ]] ||
          [[ "$1" == "left" ]]; then
-        core "$@"
+        _mon_core "$@"
         if [[ "$?" == "1" ]]; then
             return 1
         fi

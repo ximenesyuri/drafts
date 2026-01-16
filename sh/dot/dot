@@ -1,0 +1,148 @@
+#! /bin/bash
+
+source ${BASH_SOURCE%/*}/z
+
+DOT_DEFAULT_LS="ls --color=auto --group-directories-first"
+DOT_DEFAULT_LS_ALL="ls -A --color=auto --group-directories-first"
+
+DOT_DEFAULT_OPEN="${DOT_OPEN:-vim}"
+
+DOT_DEFAULT_CD() {
+    pushd -- "$1" > /dev/null 2>&1
+}
+
+DOT_DEFAULT_BACK() {
+    popd > /dev/null 2>&1 || return
+}
+
+_dot_cd() {
+    if [[ -n "$DOT_CD" ]]; then
+        "$DOT_CD" "$@"
+    else
+        DOT_DEFAULT_CD "$@"
+    fi
+}
+
+if [[ -n "$DOT_LS" ]]; then
+    DOT_COMMAND_LS=$DOT_LS
+else
+    DOT_COMMAND_LS=$DOT_DEFAULT_LS
+fi
+
+if [[ -n "$DOT_LS_ALL" ]]; then
+    DOT_COMMAND_LS_ALL=$DOT_LS_ALL
+else
+    DOT_COMMAND_LS_ALL=$DOT_DEFAULT_LS_ALL
+fi
+
+_dot_lsa() {
+    $DOT_COMMAND_LS_ALL "$@"
+}
+
+_dot_lsaf() {
+    local target="${1:-.}"
+    (
+        cd "$target" || return
+        find . -maxdepth 1 -mindepth 1 -type f -printf '%f\0' \
+        | xargs -0r ls --color=auto --
+    )
+}
+
+_dot_lsad() {
+    local target="${1:-.}"
+    (
+        cd "$target" || return
+        find . -maxdepth 1 -mindepth 1 -type d -printf '%f\0' \
+        | xargs -0r ls -d --color=auto --
+    )
+}
+
+_dot_lsf() {
+    local target="${1:-.}"
+    (
+        cd "$target" || return
+        find . -maxdepth 1 -mindepth 1 \
+             -type f ! -name '.*' \
+             -printf '%f\0' \
+        | xargs -0r ls --color=auto --
+    )
+}
+
+_dot_lsd() {
+    local target="${1:-.}"
+    (
+        cd "$target" || return
+        find . -maxdepth 1 -mindepth 1 \
+             -type d ! -name '.*' \
+             -printf '%f\0' \
+        | xargs -0r ls -d --color=auto --
+    )
+}
+
+_dot_ls() {
+    $DOT_COMMAND_LS "$@"
+}
+
+_dot_open() {
+    $DOT_DEFAULT_OPEN "$@"
+}
+
+_dot_home() {
+    _dot_cd "$HOME"
+    _dot_ls
+}
+
+dot() {
+    case "$1" in
+        "-"|"...")
+            shift
+            DOT_DEFAULT_BACK
+            _dot_ls
+            ;;
+        "..")
+            _dot_cd ..
+            _dot_ls
+            ;;
+        ".")
+            _dot_home
+            ;;
+        ",")
+            shift
+            _dot_lsa "$@"
+            ;;
+        ",f")
+            shift
+            _dot_lsaf "$@"
+            ;;
+        ",d")
+            shift
+            _dot_lsad "$@"
+            ;;
+        "")
+            _dot_ls
+            ;;
+        *)
+            if [[ -d "$1" ]]; then
+                _dot_cd "$1"
+                shift
+                _dot_ls "$@"
+            elif [[ -f "$1" ]]; then
+                _dot_open "$1"
+            else
+                _dot_ls "$@"
+            fi
+            ;;
+    esac
+}
+
+alias .='dot'
+alias ,='z'
+alias ..="dot .."
+alias ,.='dot ,'
+alias .,='dot ,'
+alias .,f='dot ,f'
+alias ,.f='dot ,f'
+alias .,d='dot ,d'
+alias ,.d='dot ,d'
+alias .f='_dot_lsf'
+alias .d='_dot_lsd'
