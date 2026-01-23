@@ -1,0 +1,839 @@
+#!/bin/bash
+
+_http_usage() {
+  cat >&2 <<'EOF'
+Usage:
+  http [METHOD] [URL] [flags...]
+
+Forms:
+  # Full URL
+  http example.com
+  http GET example.com
+  http example.com --method POST
+  http --url example.com --method POST
+  http GET http://example.com
+  http --url http://example.com
+
+  # URL composed from parts
+  http --method POST --scheme http --host 0.0.0.0 --port 9011 --path /v1/content/contexts \
+       --params { x: some, y: thing } \
+       --data   { z: aaaaa, w: sssss }
+
+  # Mixing positional host and flags
+  http POST 0.0.0.0                      --port 9011 --path /v1/content/contexts --params {...}
+  http POST 0.0.0.0:9011                 --path /v1/content/contexts             --params {...}
+  http POST 0.0.0.0:9011/v1/content/contexts                                     --params {...}
+
+Defaults:
+  - If no METHOD is given, defaults to GET.
+  - If no URL/host is given, defaults to https://httpbin.org/<method-lowercase>
+    e.g. GET -> https://httpbin.org/get, POST -> https://httpbin.org/post,
+         other methods -> https://httpbin.org/anything
+
+Data:
+  --data collects body data (JSON-ish, auto-normalised to JSON):
+    http POST example.com --data {x: 1, y: [a, b]}
+    http POST --data { x: something, y: [some, thing] }
+
+Query params:
+  --params collects query parameters (JSON-ish object -> ?key=value&...):
+    http GET example.com --params { q: search, page: 2 }
+
+URL construction helpers:
+  --url URL                         # base URL
+  --scheme SCHEME                   # http, https, ...
+  --host HOST [--port P] [--path P] # build SCHEME://HOST[:P][PATH]
+  --port P
+  --path PATH                       # leading "/" added if missing
+  --params {...}                    # appended to any existing query string
+
+Header helpers:
+  --type json|text|html|xml|form|<mime>      # Content-Type
+  --token TOKEN                              # Authorization: Bearer TOKEN
+  --user USER --pass PASS                    # Authorization: Basic (via curl -u)
+  --username USER --password PASS            # same as above
+  --proxy URL                                # curl --proxy URL
+
+Profiles (HTTP fingerprint presets):
+  --profile desktop-chrome
+  --profile mobile-chrome
+  --profile desktop-firefox
+
+Notes:
+  - URL can be positional or via --url; if no scheme, http:// is assumed.
+  - --host/--port/--path/--scheme can be used instead of a full URL; they also
+    work together with a positional/--url base (e.g. positional host + --port).
+  - --params and --data each collect all tokens until the next --flag.
+  - Any other flags/args are passed to curl.
+EOF
+}
+
+_http_map_type() {
+  local t="${1,,}"  # lowercase
+  case "$t" in
+    json)  printf '%s\n' 'application/json' ;;
+    text|txt)
+           printf '%s\n' 'text/plain; charset=utf-8' ;;
+    html)  printf '%s\n' 'text/html; charset=utf-8' ;;
+    xml)   printf '%s\n' 'application/xml' ;;
+    form|urlencoded)
+           printf '%s\n' 'application/x-www-form-urlencoded' ;;
+    *)
+           printf '%s\n' "$1" ;;
+  esac
+}
+
+_http_normalize_url() {
+  local u=$1
+  if [[ ! "$u" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// ]]; then
+    u="http://$u"
+  fi
+  printf '%s\n' "$u"
+}
+
+_http_is_method() {
+  local m=${1^^}
+  case "$m" in
+    GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|TRACE|CONNECT)
+      return 0 ;;
+    *)
+      return 1 ;;
+  esac
+}
+
+_http_relaxed_to_json() {
+  local raw="$1"
+  [[ -z "$raw" ]] && { printf '%s' ""; return; }
+
+  if echo "$raw" | jq -e . >/dev/null 2>&1; then
+    printf '%s' "$raw"
+    return
+  fi
+
+  local spaced out="" tok
+  spaced=$(sed -E 's/([][{}:,])/ \1 /g' <<<"$raw")
+
+  for tok in $spaced; do
+    [[ -z "$tok" ]] && continue
+    case "$tok" in
+      "{"|"}"|"["|"]"|":"|",")
+        out+="$tok"
+        ;;
+      true|false|null)
+        out+="$tok"
+        ;;
+      *)
+        if [[ "$tok" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+          out+="$tok"
+        else
+          local j
+          j=$(printf '%s' "$tok" | jq -Rr @json)
+          out+="$j"
+        fi
+        ;;
+    esac
+  done
+
+  if echo "$out" | jq -e . >/dev/null 2>&1; then
+    printf '%s' "$out"
+  else
+    echo "http: warning: unable to interpret --data/--params as JSON; sending raw" >&2
+    printf '%s' "$raw"
+  fi
+}
+
+_http_params_to_query() {
+  local raw="$1"
+  [[ -z "$raw" ]] && { printf '%s' ""; return; }
+
+  local json
+  json=$(_http_relaxed_to_json "$raw")
+
+  if ! echo "$json" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    echo "http: Error: --params expects a JSON object (e.g. {a: 1, b: two})" >&2
+    return 1
+  fi
+
+  local qs
+  qs=$(echo "$json" | jq -r '
+    to_entries
+    | map("\(.key|@uri)=\(.value|tostring|@uri)")
+    | join("&")
+  ')
+  printf '%s' "$qs"
+}
+
+_http_build_final_url() {
+  local base="$1" host="$2" port="$3" path="$4" query="$5" scheme="$6"
+  local url="" rest="" hostport="" path_rest="" query_rest="" source_scheme=""
+
+  if [[ -n "$host" ]]; then
+    url="$host"
+  elif [[ -n "$base" ]]; then
+    url="$base"
+  else
+    printf '%s\n' ""
+    return
+  fi
+
+  if [[ "$url" =~ ^([a-zA-Z][a-zA-Z0-9+.-]*://)(.*)$ ]]; then
+    source_scheme="${BASH_REMATCH[1]::-3}"  # strip "://"
+    rest="${BASH_REMATCH[2]}"
+  else
+    rest="$url"
+  fi
+
+  hostport="$rest"
+  if [[ "$hostport" == */* ]]; then
+    path_rest="/${hostport#*/}"
+    hostport="${hostport%%/*}"
+  else
+    path_rest=""
+  fi
+
+  if [[ "$path_rest" == *\?* ]]; then
+    query_rest="${path_rest#*\?}"
+    path_rest="${path_rest%%\?*}"
+  else
+    query_rest=""
+  fi
+
+  if [[ -n "$port" ]]; then
+    hostport="${hostport%%:*}:$port"
+  fi
+
+  if [[ -n "$path" ]]; then
+    if [[ "$path" != /* ]]; then
+      path="/$path"
+    fi
+    path_rest="$path"
+  fi
+
+  local full_q=""
+  if [[ -n "$query_rest" ]]; then
+    full_q="$query_rest"
+  fi
+  if [[ -n "$query" ]]; then
+    if [[ -n "$full_q" ]]; then
+      full_q+="&$query"
+    else
+      full_q="$query"
+    fi
+  fi
+
+  local final_scheme
+  if [[ -n "$scheme" ]]; then
+    final_scheme="$scheme"
+  elif [[ -n "$source_scheme" ]]; then
+    final_scheme="$source_scheme"
+  else
+    final_scheme="http"
+  fi
+
+  url="${final_scheme}://${hostport}${path_rest}"
+  if [[ -n "$full_q" ]]; then
+    url+="?$full_q"
+  fi
+
+  printf '%s\n' "$url"
+}
+
+http() {
+  if (( $# == 0 )) || [[ "$1" == "--help" || "$1" == "-h" ]]; then
+    _http_usage
+    return 0
+  fi
+
+  local method=""
+  local url=""
+  local scheme=""
+  local host=""
+  local port=""
+  local path=""
+
+  local data=""
+  local params_raw=""
+  local collect_data=0
+  local collect_params=0
+
+  local explicit_content_type=0
+  local auth_user=""
+  local auth_pass=""
+  local proxy_url=""
+
+  local -a curl_extra=()
+  local -a headers=()
+  local -a curl_cmd=()
+  local -a args=("$@")
+
+  local server_name=""
+  local i=0
+  local n=${#args[@]}
+
+  while (( i < n )); do
+    if [[ "${args[i]}" == "--server" ]]; then
+      (( i++ ))
+      if (( i >= n )); then
+        echo "http: Error: --server requires an argument" >&2
+        return 1
+      fi
+      server_name="${args[i]}"
+      unset 'args[i-1]' 'args[i]'
+      args=("${args[@]}")
+      n=${#args[@]}
+      i=$((i-2))
+    fi
+    (( i++ ))
+  done
+
+  if [[ -n "$server_name" ]] && [[ -n "$HTTP_SERVERS_FILE" ]] && [[ -f "$HTTP_SERVERS_FILE" ]]; then
+    if command -v jq >/dev/null 2>&1; then
+      if jq -e ".\"$server_name\"" "$HTTP_SERVERS_FILE" >/dev/null 2>&1; then
+        [[ -z "$url" ]] && url=$(jq -r ".\"$server_name\".url // empty" "$HTTP_SERVERS_FILE")
+        [[ -z "$host" ]] && host=$(jq -r ".\"$server_name\".host // empty" "$HTTP_SERVERS_FILE")
+        [[ -z "$port" ]] && port=$(jq -r ".\"$server_name\".port // empty" "$HTTP_SERVERS_FILE")
+        [[ -z "$scheme" ]] && scheme=$(jq -r ".\"$server_name\".scheme // empty" "$HTTP_SERVERS_FILE")
+        [[ -z "$path" ]] && path=$(jq -r ".\"$server_name\".path // empty" "$HTTP_SERVERS_FILE")
+        
+        local server_token
+        server_token=$(jq -r ".\"$server_name\".token // empty" "$HTTP_SERVERS_FILE")
+        if [[ -n "$server_token" ]] && ! [[ "${args[*]}" =~ "--token" ]]; then
+          headers+=(-H "Authorization: Bearer $server_token")
+        fi
+        
+        local server_user server_pass
+        server_user=$(jq -r ".\"$server_name\".user // empty" "$HTTP_SERVERS_FILE")
+        server_pass=$(jq -r ".\"$server_name\".pass // empty" "$HTTP_SERVERS_FILE")
+        if [[ -n "$server_user" ]] || [[ -n "$server_pass" ]]; then
+          if ! [[ "${args[*]}" =~ "--user" ]] && ! [[ "${args[*]}" =~ "--username" ]]; then
+            auth_user="$server_user"
+          fi
+          if ! [[ "${args[*]}" =~ "--pass" ]] && ! [[ "${args[*]}" =~ "--password" ]]; then
+            auth_pass="$server_pass"
+          fi
+        fi
+      else
+        echo "http: Error: server '$server_name' not found in $HTTP_SERVERS_FILE" >&2
+        return 1
+      fi
+    else
+      echo "http: Error: jq is required to use --server flag" >&2
+      return 1
+    fi
+  fi
+
+  i=0
+  n=${#args[@]}
+
+  while (( i < n )); do
+    local token=${args[i]}
+
+    case "$token" in
+      --url)
+        (( i++ ))
+        if (( i >= n )); then
+          echo "http: Error: --url requires an argument" >&2
+          return 1
+        fi
+        url="${args[i]}"
+        (( i++ ))
+        ;;
+
+      --scheme)
+        (( i++ ))
+        if (( i >= n )); then
+          echo "http: Error: --scheme requires an argument" >&2
+          return 1
+        fi
+        scheme="${args[i]}"
+        (( i++ ))
+        ;;
+
+      --host)
+        (( i++ ))
+        if (( i >= n )); then
+          echo "http: Error: --host requires an argument" >&2
+          return 1
+        fi
+        host=${args[i]}
+        (( i++ ))
+        ;;
+
+      --port)
+        (( i++ ))
+        if (( i >= n )); then
+          echo "http: Error: --port requires an argument" >&2
+          return 1
+        fi
+        port=${args[i]}
+        (( i++ ))
+        ;;
+
+      --path)
+        (( i++ ))
+        if (( i >= n )); then
+          echo "http: Error: --path requires an argument" >&2
+          return 1
+        fi
+        path=${args[i]}
+        (( i++ ))
+        ;;
+
+      --method)
+        (( i++ ))
+        if (( i >= n )); then
+          echo "http: Error: --method requires an argument" >&2
+          return 1
+        fi
+        method=${args[i]^^}
+        (( i++ ))
+        ;;
+
+      --data)
+        collect_data=1
+        (( i++ ))
+        ;;
+
+      --params)
+        collect_params=1
+        (( i++ ))
+        ;;
+
+      --type)
+        (( i++ ))
+        if (( i >= n )); then
+          echo "http: Error: --type requires an argument" >&2
+          return 1
+        fi
+        local mt
+        mt=$(_http_map_type "${args[i]}")
+        headers+=(-H "Content-Type: $mt")
+        explicit_content_type=1
+        (( i++ ))
+        ;;
+
+      --token)
+        (( i++ ))
+        if (( i >= n )); then
+          echo "http: Error: --token requires an argument" >&2
+          return 1
+        fi
+        headers+=(-H "Authorization: Bearer ${args[i]}")
+        (( i++ ))
+        ;;
+
+      --user|--username)
+        (( i++ ))
+        if (( i >= n )); then
+          echo "http: Error: $token requires an argument" >&2
+          return 1
+        fi
+        auth_user=${args[i]}
+        (( i++ ))
+        ;;
+
+      --pass|--password)
+        (( i++ ))
+        if (( i >= n )); then
+          echo "http: Error: $token requires an argument" >&2
+          return 1
+        fi
+        auth_pass=${args[i]}
+        (( i++ ))
+        ;;
+
+      --proxy)
+        (( i++ ))
+        if (( i >= n )); then
+          echo "http: Error: --proxy requires an argument" >&2
+          return 1
+        fi
+        proxy_url=${args[i]}
+        (( i++ ))
+        ;;
+
+      --profile)
+        (( i++ ))
+        if (( i >= n )); then
+          echo "http: Error: --profile requires an argument" >&2
+          return 1
+        fi
+        local profile="${args[i],,}"
+        case "$profile" in
+          desktop-chrome)
+            headers+=(
+              -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+              -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7'
+              -H 'Accept-Language: en-US,en;q=0.9'
+              -H 'Accept-Encoding: gzip, deflate, br'
+              -H 'Upgrade-Insecure-Requests: 1'
+              -H 'Sec-Fetch-Site: none'
+              -H 'Sec-Fetch-Mode: navigate'
+              -H 'Sec-Fetch-User: ?1'
+              -H 'Sec-Fetch-Dest: document'
+            )
+            ;;
+          mobile-chrome)
+            headers+=(
+              -H 'User-Agent: Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
+              -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7'
+              -H 'Accept-Language: en-US,en;q=0.9'
+              -H 'Accept-Encoding: gzip, deflate, br'
+              -H 'Upgrade-Insecure-Requests: 1'
+              -H 'Sec-Fetch-Site: none'
+              -H 'Sec-Fetch-Mode: navigate'
+              -H 'Sec-Fetch-User: ?1'
+              -H 'Sec-Fetch-Dest: document'
+            )
+            ;;
+          desktop-firefox)
+            headers+=(
+              -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0'
+              -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
+              -H 'Accept-Language: en-US,en;q=0.5'
+              -H 'Accept-Encoding: gzip, deflate, br'
+              -H 'Upgrade-Insecure-Requests: 1'
+            )
+            ;;
+          *)
+            echo "http: Error: unknown profile '$profile' (supported: desktop-chrome, mobile-chrome, desktop-firefox)" >&2
+            return 1
+            ;;
+        esac
+        (( i++ ))
+        ;;
+
+      *)
+        if (( collect_data )); then
+          if [[ "$token" == --* && -n "$data" ]]; then
+            collect_data=0
+            continue
+          fi
+          [[ -n "$data" ]] && data+=" "
+          data+="$token"
+          (( i++ ))
+        elif (( collect_params )); then
+          if [[ "$token" == --* && -n "$params_raw" ]]; then
+            collect_params=0
+            continue
+          fi
+          [[ -n "$params_raw" ]] && params_raw+=" "
+          params_raw+="$token"
+          (( i++ ))
+        else
+          if [[ -z "$url" && "$token" != -* ]]; then
+            if [[ -z "$method" ]] && _http_is_method "$token"; then
+              method=${token^^}
+              (( i++ ))
+            else
+              url="$token"
+              (( i++ ))
+            fi
+          elif [[ -n "$method" && -z "$url" && "$token" != -* ]]; then
+            url="$token"
+            (( i++ ))
+          else
+            curl_extra+=("$token")
+            (( i++ ))
+          fi
+        fi
+        ;;
+    esac
+  done
+
+  [[ -z "$method" ]] && method="GET"
+
+  if [[ -z "$url" && -z "$host" ]]; then
+    local def_scheme="${scheme:-https}"
+    case "$method" in
+      GET|POST|PUT|DELETE|PATCH)
+        url="${def_scheme}://httpbin.org/${method,,}"
+        ;;
+      *)
+        url="${def_scheme}://httpbin.org/anything"
+        ;;
+    esac
+  fi
+
+  local json_data=""
+  if [[ -n "$data" ]]; then
+    json_data=$(_http_relaxed_to_json "$data")
+  fi
+
+  local query_string=""
+  if [[ -n "$params_raw" ]]; then
+    query_string=$(_http_params_to_query "$params_raw") || return 1
+  fi
+
+  if [[ -n "$auth_user" || -n "$auth_pass" ]]; then
+    curl_extra+=(-u "${auth_user}:${auth_pass}")
+  fi
+
+  local final_url
+  final_url=$(_http_build_final_url "$url" "$host" "$port" "$path" "$query_string" "$scheme")
+
+  if [[ -z "$final_url" ]]; then
+    echo "http: Error: no URL/host specified and no default could be derived" >&2
+    return 1
+  fi
+
+  curl_cmd=(curl -sS -X "$method")
+
+  if [[ -n "$proxy_url" ]]; then
+    curl_cmd+=(--proxy "$proxy_url")
+  fi
+
+  curl_cmd+=("${curl_extra[@]}")
+  curl_cmd+=("${headers[@]}")
+
+  if [[ -n "$json_data" && $explicit_content_type -eq 0 ]]; then
+    curl_cmd+=(-H 'Content-Type: application/json')
+  fi
+
+  if [[ -n "$json_data" ]]; then
+    curl_cmd+=(--data-raw "$json_data")
+  fi
+
+  curl_cmd+=("$final_url")
+
+  local response
+  response="$("${curl_cmd[@]}")"
+  local status=$?
+
+  (( status != 0 )) && return "$status"
+
+  if command -v jq >/dev/null 2>&1 && jq -e . >/dev/null 2>&1 <<<"$response"; then
+    jq . <<<"$response"
+  else
+    printf '%s\n' "$response"
+  fi
+}
+
+_http_complete() {
+  local cur prev
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+  local methods=(GET POST PUT DELETE PATCH HEAD OPTIONS TRACE CONNECT)
+
+  local flags=(
+    --url
+    --scheme
+    --host
+    --port
+    --path
+    --method
+    --data
+    --params
+    --type
+    --token
+    --user
+    --username
+    --pass
+    --password
+    --proxy
+    --profile
+    --server
+    --help
+    -h
+  )
+
+  __http_is_method() {
+    local m="${1^^}"
+    case "$m" in
+      GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|TRACE|CONNECT)
+        return 0 ;;
+      *)
+        return 1 ;;
+    esac
+  }
+
+  __http_mark_url_parts() {
+    local u="$1" rest hostport
+    [[ -z "$u" ]] && return
+
+    if [[ "$u" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// ]]; then
+      scheme_present=1
+      rest="${u#*://}"
+    else
+      rest="$u"
+    fi
+
+    hostport="$rest"
+    if [[ "$hostport" == */* ]]; then
+      path_present=1
+      hostport="${hostport%%/*}"
+    fi
+
+    if [[ -n "$hostport" ]]; then
+      host_present=1
+    fi
+    if [[ "$hostport" == *:* ]]; then
+      port_present=1
+    fi
+  }
+
+  case "$prev" in
+    --method)
+      local mcur="${cur^^}"
+      COMPREPLY=( $(compgen -W "${methods[*]}" -- "$mcur") )
+      return
+      ;;
+    --profile)
+      local profiles="desktop-chrome mobile-chrome desktop-firefox"
+      COMPREPLY=( $(compgen -W "$profiles" -- "$cur") )
+      return
+      ;;
+    --type)
+      local types="json text html xml form"
+      COMPREPLY=( $(compgen -W "$types" -- "$cur") )
+      return
+      ;;
+    --server)
+      if [[ -n "$HTTP_SERVERS_FILE" ]] && [[ -f "$HTTP_SERVERS_FILE" ]] && command -v jq >/dev/null 2>&1; then
+        local servers
+        servers=$(jq -r 'keys[]' "$HTTP_SERVERS_FILE" 2>/dev/null)
+        COMPREPLY=( $(compgen -W "$servers" -- "$cur") )
+      fi
+      return
+      ;;
+    --url|--scheme|--host|--port|--path|--data|--params|--token|--user|--username|--pass|--password|--proxy)
+      return
+      ;;
+  esac
+
+  local method_set=0
+  local url_seen=0
+
+  local host_present=0
+  local port_present=0
+  local path_present=0
+  local scheme_present=0
+
+  local host_flag_used=0
+  local port_flag_used=0
+  local path_flag_used=0
+  local scheme_flag_used=0
+
+  local i=1
+  while (( i < COMP_CWORD )); do
+    local w="${COMP_WORDS[i]}"
+
+    case "$w" in
+      --url)
+        ((i++))
+        if (( i < COMP_CWORD )); then
+          url_seen=1
+          __http_mark_url_parts "${COMP_WORDS[i]}"
+        fi
+        ((i++))
+        continue
+        ;;
+      --scheme)
+        scheme_flag_used=1
+        scheme_present=1
+        ((i++))
+        continue
+        ;;
+      --host)
+        host_flag_used=1
+        host_present=1
+        ((i+=2))
+        continue
+        ;;
+      --port)
+        port_flag_used=1
+        port_present=1
+        ((i+=2))
+        continue
+        ;;
+      --path)
+        path_flag_used=1
+        path_present=1
+        ((i+=2))
+        continue
+        ;;
+      --method)
+        ((i++))
+        if (( i < COMP_CWORD )); then
+          method_set=1
+        fi
+        ((i++))
+        continue
+        ;;
+      --data|--params)
+        return 0
+        ;;
+      --type|--token|--user|--username|--pass|--password|--proxy|--profile|--server)
+        ((i+=2))
+        continue
+        ;;
+      -*)
+        ;;
+      *)
+        if (( !method_set && !url_seen )) && __http_is_method "$w"; then
+          method_set=1
+        elif (( !url_seen )); then
+          url_seen=1
+          __http_mark_url_parts "$w"
+        fi
+        ;;
+    esac
+
+    ((i++))
+  done
+
+  local flag_candidates=()
+  local method_candidates=()
+
+  local f present j
+  for f in "${flags[@]}"; do
+    present=0
+    for ((j=1; j<COMP_CWORD; j++)); do
+      [[ "${COMP_WORDS[j]}" == "$f" ]] && { present=1; break; }
+    done
+    (( present )) && continue
+
+    if [[ "$f" == "--method" && $method_set -eq 1 ]]; then
+      continue
+    fi
+
+    if [[ "$f" == "--host"   && $host_present   -eq 1 ]]; then continue; fi
+    if [[ "$f" == "--port"   && $port_present   -eq 1 ]]; then continue; fi
+    if [[ "$f" == "--path"   && $path_present   -eq 1 ]]; then continue; fi
+    if [[ "$f" == "--scheme" && $scheme_present -eq 1 ]]; then continue; fi
+
+    if (( host_flag_used || port_flag_used || path_flag_used || scheme_flag_used )) && [[ "$f" == "--url" ]]; then
+      continue
+    fi
+
+    flag_candidates+=( "$f" )
+  done
+
+  if (( method_set == 0 )); then
+    method_candidates+=( "${methods[@]}" )
+  fi
+
+  if [[ "$cur" == -* ]]; then
+    COMPREPLY=( $(compgen -W "${flag_candidates[*]}" -- "$cur") )
+  else
+    local mcur="${cur^^}"
+    local mcomp=()
+    local fcomp=()
+
+    if ((${#method_candidates[@]})); then
+      mcomp=( $(compgen -W "${method_candidates[*]}" -- "$mcur") )
+    fi
+    if ((${#flag_candidates[@]})); then
+      fcomp=( $(compgen -W "${flag_candidates[*]}" -- "$cur") )
+    fi
+
+    COMPREPLY=( "${mcomp[@]}" "${fcomp[@]}" )
+  fi
+}
+
+
+# Register completion
+complete -F _http_complete http
+
