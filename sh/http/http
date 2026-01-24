@@ -103,72 +103,77 @@ _http_is_method() {
 
 _http_relaxed_to_json() {
   local raw="$1"
-  [[ -z "$raw" ]] && { printf '%s' ""; return; }
 
-  if echo "$raw" | jq -e . >/dev/null 2>&1; then
-    printf '%s' "$raw"
-    return
+  raw=${raw#"${raw%%[![:space:]]*}"}
+  raw=${raw%"${raw##*[![:space:]]}"}
+
+  if [[ "$raw" == \{* ]]; then
+    raw=${raw#\{}
+  fi
+  if [[ "$raw" == *\} ]]; then
+    raw=${raw%\}}
   fi
 
-  local spaced="" ch
-  local i len=${#raw}
-  for (( i = 0; i < len; i++ )); do
-    ch=${raw:i:1}
-    case "$ch" in
-      "{"|"}"|"["|"]"|":"|",")
-        spaced+=$'\n'"$ch"$'\n'
-        ;;
-      *)
-        spaced+="$ch"
-        ;;
-    esac
-  done
+  local json="{" first=1
 
-  local out="" tok
+  while IFS= read -r segment; do
+    segment=${segment#"${segment%%[![:space:]]*}"}
+    segment=${segment%"${segment##*[![:space:]]}"}
+    [[ -z "$segment" ]] && continue
 
-  while IFS= read -r tok; do
-    tok=${tok#"${tok%%[![:space:]]*}"}
-    tok=${tok%"${tok##*[![:space:]]}"}
-    [[ -z "$tok" ]] && continue
+    local key val
+    key=${segment%%:*}
+    val=${segment#*:}
 
-    case "$tok" in
-      "{"|"}"|"["|"]"|":"|",")
-        out+="$tok"
-        ;;
-      true|false|null)
-        out+="$tok"
-        ;;
-      *)
-        if [[ "$tok" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
-          out+="$tok"
-        else
-          local j
-          j=$(printf '%s' "$tok" | jq -Rr @json)
-          out+="$j"
-        fi
-        ;;
-    esac
-  done <<<"$spaced"
+    key=${key#"${key%%[![:space:]]*}"}
+    key=${key%"${key##*[![:space:]]}"}
+    val=${val#"${val%%[![:space:]]*}"}
+    val=${val%"${val##*[![:space:]]}"}
 
-  if echo "$out" | jq -e . >/dev/null 2>&1; then
-    printf '%s' "$out"
+    [[ -z "$key" ]] && continue
+
+    # JSON-quote key
+    local jkey jval
+    jkey=$(printf '%s' "$key" | jq -Rr @json)
+
+    if [[ "$val" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+      jval="$val"
+    elif [[ "$val" == "true" || "$val" == "false" || "$val" == "null" ]]; then
+      jval="$val"
+    else
+      jval=$(printf '%s' "$val" | jq -Rr @json)
+    fi
+
+    if (( first )); then
+      json+="$jkey:$jval"
+      first=0
+    else
+      json+=",$jkey:$jval"
+    fi
+  done <<<"$(tr ',' '\n' <<<"$raw")"
+
+  json+="}"
+
+  if echo "$json" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    printf '%s' "$json"
   else
-    echo "http: warning: unable to interpret --data/--params as JSON; sending raw" >&2
-    printf '%s' "$raw"
+    return 1
   fi
 }
-
 
 _http_params_to_query() {
   local raw="$1"
   [[ -z "$raw" ]] && { printf '%s' ""; return; }
 
   local json
-  json=$(_http_relaxed_to_json "$raw")
 
-  if ! echo "$json" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    echo "http: Error: --params expects a JSON object (e.g. {a: 1, b: two})" >&2
-    return 1
+  if echo "$raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    json="$raw"
+  else
+    if ! json=$(_http_relaxed_to_json "$raw"); then
+      echo "http: Error: --params expects a JSON object (e.g. {a: 1, b: two})" >&2
+      return 1
+    fi
   fi
 
   local qs
@@ -179,7 +184,6 @@ _http_params_to_query() {
   ')
   printf '%s' "$qs"
 }
-
 _http_build_final_url() {
   local base="$1" host="$2" port="$3" path="$4" query="$5" scheme="$6"
   local url="" rest="" hostport="" path_rest="" query_rest="" source_scheme=""
