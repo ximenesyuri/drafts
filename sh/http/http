@@ -69,7 +69,7 @@ EOF
 }
 
 _http_map_type() {
-  local t="${1,,}"  # lowercase
+  local t="${1,,}"
   case "$t" in
     json)  printf '%s\n' 'application/json' ;;
     text|txt)
@@ -110,11 +110,27 @@ _http_relaxed_to_json() {
     return
   fi
 
-  local spaced out="" tok
-  spaced=$(sed -E 's/([][{}:,])/ \1 /g' <<<"$raw")
+  local spaced="" ch
+  local i len=${#raw}
+  for (( i = 0; i < len; i++ )); do
+    ch=${raw:i:1}
+    case "$ch" in
+      "{"|"}"|"["|"]"|":"|",")
+        spaced+=$'\n'"$ch"$'\n'
+        ;;
+      *)
+        spaced+="$ch"
+        ;;
+    esac
+  done
 
-  for tok in $spaced; do
+  local out="" tok
+
+  while IFS= read -r tok; do
+    tok=${tok#"${tok%%[![:space:]]*}"}
+    tok=${tok%"${tok##*[![:space:]]}"}
     [[ -z "$tok" ]] && continue
+
     case "$tok" in
       "{"|"}"|"["|"]"|":"|",")
         out+="$tok"
@@ -132,7 +148,7 @@ _http_relaxed_to_json() {
         fi
         ;;
     esac
-  done
+  done <<<"$spaced"
 
   if echo "$out" | jq -e . >/dev/null 2>&1; then
     printf '%s' "$out"
@@ -141,6 +157,7 @@ _http_relaxed_to_json() {
     printf '%s' "$raw"
   fi
 }
+
 
 _http_params_to_query() {
   local raw="$1"
@@ -177,7 +194,7 @@ _http_build_final_url() {
   fi
 
   if [[ "$url" =~ ^([a-zA-Z][a-zA-Z0-9+.-]*://)(.*)$ ]]; then
-    source_scheme="${BASH_REMATCH[1]::-3}"  # strip "://"
+    source_scheme="${BASH_REMATCH[1]::-3}"
     rest="${BASH_REMATCH[2]}"
   else
     rest="$url"
@@ -239,6 +256,14 @@ _http_build_final_url() {
 }
 
 http() {
+  if ! command -v curl > /dev/null 2>&1; then
+      echo "Error: missing 'curl' dependence."
+      return 1
+  fi
+  if ! command -v jq > /dev/null 2>&1; then
+      echo "Error: missing 'jq' dependence."
+      return 1
+  fi
   if (( $# == 0 )) || [[ "$1" == "--help" || "$1" == "-h" ]]; then
     _http_usage
     return 0
