@@ -39,6 +39,10 @@ Query params:
   --params collects query parameters (JSON-ish object -> ?key=value&...):
     http GET example.com --params { q: search, page: 2 }
 
+Headers:
+  --headers collects headers (JSON-ish object -> Header: Value):
+    http GET example.com --headers { Accept: application/json, X-Token: abc123 }
+
 URL construction helpers:
   --url URL                         # base URL
   --scheme SCHEME                   # http, https, ...
@@ -59,11 +63,15 @@ Profiles (HTTP fingerprint presets):
   --profile mobile-chrome
   --profile desktop-firefox
 
+Other:
+  --info                                     # show HTTP response headers (curl -i)
+
 Notes:
   - URL can be positional or via --url; if no scheme, http:// is assumed.
   - --host/--port/--path/--scheme can be used instead of a full URL; they also
     work together with a positional/--url base (e.g. positional host + --port).
   - --params and --data each collect all tokens until the next --flag.
+  - --headers also collects all tokens until the next --flag.
   - Any other flags/args are passed to curl.
 EOF
 }
@@ -132,7 +140,6 @@ _http_relaxed_to_json() {
 
     [[ -z "$key" ]] && continue
 
-    # JSON-quote key
     local jkey jval
     jkey=$(printf '%s' "$key" | jq -Rr @json)
 
@@ -184,6 +191,7 @@ _http_params_to_query() {
   ')
   printf '%s' "$qs"
 }
+
 _http_build_final_url() {
   local base="$1" host="$2" port="$3" path="$4" query="$5" scheme="$6"
   local url="" rest="" hostport="" path_rest="" query_rest="" source_scheme=""
@@ -224,10 +232,23 @@ _http_build_final_url() {
   fi
 
   if [[ -n "$path" ]]; then
-    if [[ "$path" != /* ]]; then
-      path="/$path"
+    local base_path="$path_rest"
+    local add_path="$path"
+
+    if [[ -n "$base_path" && "$base_path" != /* ]]; then
+      base_path="/$base_path"
     fi
-    path_rest="$path"
+
+    if [[ "$add_path" != /* ]]; then
+      add_path="/$add_path"
+    fi
+
+    if [[ -z "$base_path" ]]; then
+      path_rest="$add_path"
+    else
+      base_path="${base_path%/}"
+      path_rest="$base_path$add_path"
+    fi
   fi
 
   local full_q=""
@@ -259,6 +280,7 @@ _http_build_final_url() {
   printf '%s\n' "$url"
 }
 
+
 http() {
   if ! command -v curl > /dev/null 2>&1; then
       echo "Error: missing 'curl' dependence."
@@ -282,13 +304,16 @@ http() {
 
   local data=""
   local params_raw=""
+  local headers_raw=""
   local collect_data=0
   local collect_params=0
+  local collect_headers=0
 
   local explicit_content_type=0
   local auth_user=""
   local auth_pass=""
   local proxy_url=""
+  local info_mode=0
 
   local -a curl_extra=()
   local -a headers=()
@@ -428,6 +453,11 @@ http() {
         (( i++ ))
         ;;
 
+      --headers)
+        collect_headers=1
+        (( i++ ))
+        ;;
+
       --type)
         (( i++ ))
         if (( i >= n )); then
@@ -532,6 +562,11 @@ http() {
         (( i++ ))
         ;;
 
+      --info)
+        info_mode=1
+        (( i++ ))
+        ;;
+
       *)
         if (( collect_data )); then
           if [[ "$token" == --* && -n "$data" ]]; then
@@ -548,6 +583,14 @@ http() {
           fi
           [[ -n "$params_raw" ]] && params_raw+=" "
           params_raw+="$token"
+          (( i++ ))
+        elif (( collect_headers )); then
+          if [[ "$token" == --* && -n "$headers_raw" ]]; then
+            collect_headers=0
+            continue
+          fi
+          [[ -n "$headers_raw" ]] && headers_raw+=" "
+          headers_raw+="$token"
           (( i++ ))
         else
           if [[ -z "$url" && "$token" != -* ]]; then
@@ -606,7 +649,30 @@ http() {
     return 1
   fi
 
-  curl_cmd=(curl -sS -X "$method")
+  if [[ -n "$headers_raw" ]]; then
+    local headers_json
+    if echo "$headers_raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
+      headers_json="$headers_raw"
+    else
+      if ! headers_json=$(_http_relaxed_to_json "$headers_raw"); then
+        echo "http: Error: --headers expects a JSON object (e.g. {Header: value})" >&2
+        return 1
+      fi
+    fi
+
+    while IFS= read -r header_line; do
+      [[ -z "$header_line" ]] && continue
+      local header_name="${header_line%%:*}"
+      headers+=(-H "$header_line")
+      if [[ "${header_name,,}" == "content-type" ]]; then
+        explicit_content_type=1
+      fi
+    done < <(echo "$headers_json" | jq -r 'to_entries[] | "\(.key): \(.value|tostring)"')
+  fi
+
+  curl_cmd=(curl -sS)
+  (( info_mode )) && curl_cmd+=(-i)
+  curl_cmd+=(-X "$method")
 
   if [[ -n "$proxy_url" ]]; then
     curl_cmd+=(--proxy "$proxy_url")
@@ -655,6 +721,7 @@ _http_complete() {
     --method
     --data
     --params
+    --headers
     --type
     --token
     --user
@@ -664,6 +731,7 @@ _http_complete() {
     --proxy
     --profile
     --server
+    --info
     --help
     -h
   )
@@ -727,7 +795,7 @@ _http_complete() {
       fi
       return
       ;;
-    --url|--scheme|--host|--port|--path|--data|--params|--token|--user|--username|--pass|--password|--proxy)
+    --url|--scheme|--host|--port|--path|--data|--params|--headers|--token|--user|--username|--pass|--password|--proxy)
       return
       ;;
   esac
@@ -791,10 +859,10 @@ _http_complete() {
         ((i++))
         continue
         ;;
-      --data|--params)
+      --data|--params|--headers)
         return 0
         ;;
-      --type|--token|--user|--username|--pass|--password|--proxy|--profile|--server)
+      --type|--token|--user|--username|--pass|--password|--proxy|--profile|--server|--info)
         ((i+=2))
         continue
         ;;
@@ -863,6 +931,5 @@ _http_complete() {
 }
 
 
-# Register completion
 complete -F _http_complete http
 
