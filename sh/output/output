@@ -1,0 +1,128 @@
+#!/bin/bash
+
+output() {
+    local history_file="$HOME/.bash_output_history"
+    
+    if [[ $# -eq 0 ]]; then
+        if [[ ! -f "$history_file" ]]; then
+            echo "No output history found. Run 'output <command>' to capture command output." >&2
+            return 1
+        fi
+        
+        if ! command -v fzf &> /dev/null; then
+            echo "fzf is required but not installed. Please install fzf first." >&2
+            return 1
+        fi
+        
+        local temp_file=$(mktemp)
+        
+        awk '
+        BEGIN { RS = "\n=== CMD: " }
+        NR > 1 {
+            marker_pos = index($0, " ===\n")
+            if (marker_pos > 0) {
+                cmd = substr($0, 1, marker_pos - 1)
+                output_start = marker_pos + 5
+                output = substr($0, output_start)
+                end_pos = index(output, "\n=== END ===")
+                if (end_pos > 0) {
+                    output = substr(output, 1, end_pos - 1)
+                }
+                # Create preview
+                if (length(output) > 80) {
+                    preview = substr(output, 1, 80) "..."
+                } else {
+                    preview = output
+                }
+                gsub(/\n/, " ", preview)
+                gsub(/\t/, " ", preview)
+                printf "%s\t%s\n", cmd, preview
+            }
+        }
+        ' "$history_file" > "$temp_file"
+        
+        local selected_cmd
+        selected_cmd=$(cat "$temp_file" | fzf \
+            --delimiter='\t' \
+            --with-nth=1 \
+            --preview="echo 'Command: {1}'; echo ''; echo 'Output:'; echo '{2}'" \
+            --preview-window=right:60%:wrap \
+            --header="Select a command to copy its output to clipboard (ESC to cancel)" \
+            --height=80% \
+            --layout=reverse \
+            --border \
+            | cut -f1)
+        
+        rm -f "$temp_file"
+        
+        if [[ -n "$selected_cmd" ]]; then
+            # Extract the full output for the selected command
+            local full_output
+            full_output=$(awk -v cmd="$selected_cmd" '
+            BEGIN { 
+                RS = "\n=== CMD: "
+            }
+            $0 ~ ("^" cmd " ===") {
+                marker_pos = index($0, " ===\n")
+                if (marker_pos > 0) {
+                    output_start = marker_pos + 5
+                    output = substr($0, output_start)
+                    end_pos = index(output, "\n=== END ===")
+                    if (end_pos > 0) {
+                        output = substr(output, 1, end_pos - 1)
+                    }
+                    print output
+                    exit
+                }
+            }
+            ' "$history_file")
+            
+            local copied=false
+            if command -v pbcopy &> /dev/null; then
+                echo -n "$full_output" | pbcopy
+                echo "Output copied to clipboard (pbcopy)"
+                copied=true
+            elif command -v xclip &> /dev/null; then
+                echo -n "$full_output" | xclip -selection clipboard
+                echo "Output copied to clipboard (xclip)"
+                copied=true
+            elif command -v xsel &> /dev/null; then
+                echo -n "$full_output" | xsel --clipboard --input
+                echo "Output copied to clipboard (xsel)"
+                copied=true
+            fi
+            
+            if [[ "$copied" != "true" ]]; then
+                echo "Clipboard tool not found. Here's the output:"
+                echo "---"
+                echo "$full_output"
+                echo "---"
+            fi
+        fi
+        return 0
+    fi
+    
+    local cmd="$*"
+    
+    if [[ ! -f "$history_file" ]]; then
+        touch "$history_file"
+    fi
+    
+    local output
+    output=$(eval "$cmd" 2>&1)
+    local exit_code=$?
+    
+    {
+        echo ""
+        echo "=== CMD: $cmd ==="
+        echo "$output"
+        echo "=== END ==="
+    } >> "$history_file"
+    
+    if [[ -f "$history_file" ]]; then
+        tail -n 1000 "$history_file" > "${history_file}.tmp" && mv "${history_file}.tmp" "$history_file"
+    fi
+    
+    return $exit_code
+}
+
