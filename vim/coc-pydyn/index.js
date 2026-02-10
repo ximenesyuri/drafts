@@ -4,10 +4,16 @@ const {
   CompletionItemKind,
   Uri,
 } = require('coc.nvim');
-const { spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
+/**
+ * Try to auto-detect a project venv python by:
+ * - walking up from the file's directory
+ * - looking for pyproject.toml
+ * - using <that-dir>/.venv/bin/python (or .venv/Scripts/python.exe on Windows)
+ */
 function detectVenvPython(filename) {
   const startDir = filename ? path.dirname(filename) : process.cwd();
   let dir = startDir;
@@ -30,6 +36,12 @@ function detectVenvPython(filename) {
   return null;
 }
 
+/**
+ * Resolve python path:
+ * - 1st: pydyn.pythonPath from coc-settings.json (if non-empty)
+ * - 2nd: auto-detect from pyproject.toml + .venv
+ * - 3rd: 'python3'
+ */
 function getPythonPath(filename) {
   const config = workspace.getConfiguration('pydyn');
   const configured = (config.get('pythonPath', '') || '').trim();
@@ -45,8 +57,45 @@ function getPythonPath(filename) {
   return 'python3';
 }
 
+function cleanSourceForCompletion(source, currentLine) {
+  const lines = source.split(/\r?\n/);
+  
+  if (currentLine < lines.length) {
+    const origLine = lines[currentLine];
+    const indentMatch = origLine.match(/^\s*/);
+    const indent = indentMatch ? indentMatch[0] : '';
+    lines[currentLine] = indent + 'pass  # coc-pydyn: neutered line';
+  }
+  
+  return lines.map(line => {
+    if (line.match(/\b(run|start|serve|listen|main)\s*\(/)) {
+      const indentMatch = line.match(/^(\s*)/);
+      const indent = indentMatch ? indentMatch[1] : '';
+      return indent + 'pass  # coc-pydyn: neutered execution';
+    }
+    
+    if (line.match(/^\s*if\s+__name__\s*==/)) {
+      const indentMatch = line.match(/^(\s*)/);
+      const indent = indentMatch ? indentMatch[1] : '';
+      return indent + 'if False:  # coc-pydyn: disabled main block';
+    }
+    
+    return line;
+  }).join('\n');
+}
+
 const PY_HELPER = `
-import sys, os, json, types, traceback
+import sys, os, json, types, traceback, io
+from contextlib import redirect_stdout, redirect_stderr
+import signal
+
+def timeout_handler(signum, frame):
+    print("[]")
+    sys.exit(1)
+
+if hasattr(signal, 'SIGALRM'):
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(2)
 
 def compute_sys_paths(filename):
     dirname = os.path.dirname(filename)
@@ -90,18 +139,17 @@ def main():
         mod.__file__ = filename
         g = mod.__dict__
 
-        try:
-            code = compile(src, filename, "exec")
-            exec(code, g, g)
-        except Exception:
-            traceback.print_exc()
-            sys.exit(1)
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
 
         try:
-            obj = eval(expr, g, g)
-        except Exception:
-            traceback.print_exc()
-            sys.exit(1)
+            with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+                code = compile(src, filename, "exec")
+                exec(code, g, g)
+                obj = eval(expr, g, g)
+        except Exception as e:
+            print("[]")
+            sys.exit(0)
 
         try:
             names = []
@@ -113,6 +161,8 @@ def main():
             names = []
 
         print(json.dumps(names))
+    except Exception:
+        print("[]")
     finally:
         for p in remove_paths:
             try:
@@ -121,51 +171,80 @@ def main():
                 pass
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        print("[]")
 `;
 
 function getDynamicAttrs(pythonPath, filename, expr, attrPrefix, source) {
-  console.error('[coc-pydyn] spawning python:', pythonPath);
-  const result = spawnSync(
-    pythonPath,
-    ['-c', PY_HELPER, filename, expr, attrPrefix],
-    {
-      encoding: 'utf8',
-      input: source,
-    }
-  );
+  return new Promise((resolve) => {
+    console.error('[coc-pydyn] spawning python:', pythonPath);
 
-  if (result.error) {
-    console.error('[coc-pydyn] spawn error:', result.error);
-    return [];
-  }
+    const child = spawn(
+      pythonPath,
+      ['-c', PY_HELPER, filename, expr, attrPrefix]
+    );
 
-  if (result.status !== 0) {
-    if (result.stderr) {
-      console.error('[coc-pydyn] python stderr:\n' + result.stderr);
-    } else {
-      console.error('[coc-pydyn] python exited with code', result.status);
-    }
-    return [];
-  }
+    let stdoutData = '';
+    let stderrData = '';
 
-  const stdout = (result.stdout || '').trim();
-  if (!stdout) {
-    console.error('[coc-pydyn] empty stdout from python');
-    return [];
-  }
+    child.stdout.on('data', (data) => {
+      stdoutData += data.toString();
+    });
 
-  try {
-    const arr = JSON.parse(stdout);
-    if (Array.isArray(arr)) {
-      console.error('[coc-pydyn] dynamic attrs:', arr);
-      return arr;
-    }
-    console.error('[coc-pydyn] stdout not array JSON:', stdout);
-  } catch (e) {
-    console.error('[coc-pydyn] JSON parse error:', e, 'output:', stdout);
-  }
-  return [];
+    child.stderr.on('data', (data) => {
+      stderrData += data.toString();
+    });
+
+    child.on('close', (code) => {
+      if (code !== 0 && code !== null) {
+        if (stderrData) {
+          console.error('[coc-pydyn] python stderr:\n' + stderrData);
+        } else {
+          console.error('[coc-pydyn] python exited with code', code);
+        }
+        resolve([]);
+        return;
+      }
+
+      const stdout = stdoutData.trim();
+      if (!stdout) {
+        resolve([]);
+        return;
+      }
+
+      try {
+        const arr = JSON.parse(stdout);
+        if (Array.isArray(arr)) {
+          resolve(arr);
+        } else {
+          resolve([]);
+        }
+      } catch (e) {
+        console.error('[coc-pydyn] JSON parse error:', e.message, 'output:', stdout);
+        resolve([]);
+      }
+    });
+
+    child.on('error', (error) => {
+      console.error('[coc-pydyn] spawn error:', error);
+      resolve([]);
+    });
+
+    child.stdin.write(source);
+    child.stdin.end();
+
+    const timeout = setTimeout(() => {
+      console.error('[coc-pydyn] python execution timed out, killing process');
+      child.kill('SIGKILL');
+      resolve([]);
+    }, 2000);
+
+    child.on('close', () => {
+      clearTimeout(timeout);
+    });
+  });
 }
 
 async function activate(context) {
@@ -178,48 +257,39 @@ async function activate(context) {
       console.error('[coc-pydyn] completion requested');
 
       if (document.languageId !== 'python') {
-        console.error('[coc-pydyn] not python, languageId=', document.languageId);
         return [];
       }
 
       const lineText = document.lineAt(position.line).text;
       const prefixLine = lineText.slice(0, position.character);
-      console.error('[coc-pydyn] line:', prefixLine);
 
       const m = prefixLine.match(
         /([A-Za-z_][A-Za-z0-9_\\.]*?)\.([A-Za-z_][A-Za-z0-9_]*)?$/
       );
       if (!m) {
-        console.error('[coc-pydyn] no expr match');
         return [];
       }
 
       const expr = m[1];
       const attrPrefix = m[2] || '';
-      console.error('[coc-pydyn] expr =', expr, 'attrPrefix =', attrPrefix);
 
       const filename = Uri.parse(document.uri).fsPath;
-      console.error('[coc-pydyn] filename =', filename);
 
       const pythonPath = getPythonPath(filename);
-      console.error('[coc-pydyn] using python:', pythonPath);
 
-      let lines = document.getText().split(/\r?\n/);
-      if (position.line < lines.length) {
-        const origLine = lines[position.line];
-        const indentMatch = origLine.match(/^\s*/);
-        const indent = indentMatch ? indentMatch[0] : '';
-        lines[position.line] = indent + 'pass';
-      }
-      const sourceForExec = lines.join('\n');
+      const sourceForExec = cleanSourceForCompletion(document.getText(), position.line);
 
-      const attrs = getDynamicAttrs(
+      console.error('[coc-pydyn] expr =', expr, 'attrPrefix =', attrPrefix);
+
+      const attrs = await getDynamicAttrs(
         pythonPath,
         filename,
         expr,
         attrPrefix,
         sourceForExec
       );
+
+      console.error('[coc-pydyn] dynamic attrs:', attrs);
 
       const seen = new Set();
       const items = [];
