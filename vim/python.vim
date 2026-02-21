@@ -15,6 +15,7 @@ syn keyword pythonImport        import
 syn match pythonRaiseFromStatement      '\<from\>'
 syn match pythonImport          '^\s*\zsfrom\>'
 
+
 syn keyword pythonStatement   as nonlocal
 syn match   pythonStatement   '\v\.@<!<await>'
 syn match   pythonFunction    '\%([^[:cntrl:][:space:][:punct:][:digit:]]\|_\)\%([^[:cntrl:][:punct:][:space:]]\|_\)*' display contained
@@ -32,7 +33,7 @@ syn region pythonReturnTypeHint
       \ end=/\ze:/
       \ containedin=ALLBUT,pythonString,pythonRawString,pythonComment,pythonBytes,pythonRawBytes,pythonFString,pythonRawFString
       \ keepend
-syn match pythonTypeHint /:s*\zs[^#=,()]\+/ containedin=ALLBUT,pythonString,pythonRawString,pythonComment,pythonBytes,pythonRawBytes,pythonFString,pythonRawFString display
+syn match pythonTypeHint /\%(:\s*\)\@<=[^#=,()"'\[\]]\+/ containedin=ALLBUT,pythonString,pythonRawString,pythonComment,pythonBytes,pythonRawBytes,pythonFString,pythonRawFString display
 
 " Operators
 syn keyword pythonOperator and in is not or
@@ -163,6 +164,7 @@ unlet s:exs_re
 
 " Delimiters
 syn match pythonDelimiter /[}{\[\](),]/
+syn match pythonColon /:/ containedin=ALLBUT,pythonString,pythonRawString,pythonComment,pythonBytes,pythonRawBytes,pythonFString,pythonRawFString display
 
 hi link pythonStatement        Statement
 hi link pythonRaiseFromStatement   Statement
@@ -175,7 +177,7 @@ hi link pythonRepeat           Repeat
 hi link pythonException        Exception
 hi link pythonOperator         Operator
 hi link pythonDelimiter        Delimiter
-hi link pythonEnd              Constant
+hi link pythonColon            Delimiter
 hi link pythonArrowOperator    Operator
 
 hi link pythonDecorator        Define
