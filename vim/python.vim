@@ -1,10 +1,13 @@
 syntax clear
 
-syn match pythonFunctionCall '\%([^[:cntrl:][:space:][:punct:][:digit:]]\|_\)\%([^[:cntrl:][:punct:][:space:]]\|_\)*\ze\%(\s*(\)'
+" Delimiters
+syn match pythonDelimiter /[\[\](),{}]/
+syn match pythonColon /:/ containedin=ALLBUT,pythonString,pythonRawString,pythonComment,pythonBytes,pythonRawBytes,pythonFString,pythonRawFString display
+
+syn match pythonFunctionCall '\%([^[:cntrl:]:[:space:][:punct:][:digit:]]\|_\)\%([^[:cntrl:][:punct:][:space:]]\|_\)*\ze\%(\s*(\)'
 
 syn keyword pythonStatement     break continue del return pass yield global assert lambda with
 syn keyword pythonStatement     raise nextgroup=pythonExClass skipwhite
-syn keyword pythonStatement     def nextgroup=pythonFunction skipwhite
 syn keyword pythonStatement     class nextgroup=pythonClass skipwhite
 syn keyword pythonClassVar      self cls mcs
 syn keyword pythonRepeat        for while
@@ -15,25 +18,73 @@ syn keyword pythonImport        import
 syn match pythonRaiseFromStatement      '\<from\>'
 syn match pythonImport          '^\s*\zsfrom\>'
 
-
 syn keyword pythonStatement   as nonlocal
 syn match   pythonStatement   '\v\.@<!<await>'
 syn match   pythonFunction    '\%([^[:cntrl:][:space:][:punct:][:digit:]]\|_\)\%([^[:cntrl:][:punct:][:space:]]\|_\)*' display contained
 syn match   pythonClass       '\%([^[:cntrl:][:space:][:punct:][:digit:]]\|_\)\%([^[:cntrl:][:punct:][:space:]]\|_\)*' display contained
-syn match   pythonStatement   '\<async\s\+def\>' nextgroup=pythonFunction skipwhite
 syn match   pythonStatement   '\<async\s\+with\>'
 syn match   pythonStatement   '\<async\s\+for\>'
-syn cluster pythonExpression contains=pythonStatement,pythonRepeat,pythonConditional,pythonOperator,pythonNumber,pythonHexNumber,pythonOctNumber,pythonBinNumber,pythonFloat,pythonString,pythonFString,pythonRawString,pythonRawFString,pythonBytes,pythonBoolean,pythonNone,pythonSingleton,pythonBuiltinObj,pythonBuiltinFunc,pythonBuiltinType,pythonClassVar
+syn keyword pythonStatement def contained containedin=pythonFuncSignature nextgroup=pythonFunction skipwhite
+syn match pythonStatement '\<async\s\+def\>' contained containedin=pythonFuncSignature nextgroup=pythonFunction skipwhite
+syn cluster pythonExpression contains=pythonStatement,pythonRepeat,pythonConditional,pythonOperator,pythonNumber,pythonHexNumber,pythonOctNumber,pythonBinNumber,pythonFloat,pythonString,pythonFString,pythonRawString,pythonRawFString,pythonBytes,pythonBoolean,pythonNone,pythonSingleton,pythonBuiltinAttr,pythonBuiltinFunc,pythonBuiltinType,pythonClassVar,pythonFunctionCall,pythonDelimiter
 
-" Type Hints
-syn match pythonArrowOperator /->/ display
+
+syn match pythonAttr '\%(\.\)\@<=\%([^[:cntrl:][:space:][:punct:][:digit:]]\|_\)\%([^[:cntrl:][:punct:][:space:]]\|_\)*\%(\s*(\)\@!' contained containedin=ALLBUT,pythonString,pythonRawString,pythonComment,pythonBytes,pythonRawBytes,pythonFString,pythonRawFString,pythonImport
+
+" Types
+syn region pythonDict
+      \ matchgroup=pythonDelimiter
+      \ start='{'
+      \ end='}'
+      \ contains=@pythonExpression,
+      \          pythonFunctionCall,
+      \          pythonString,pythonRawString,
+      \          pythonBytes,pythonRawBytes,
+      \          pythonFString,pythonRawFString,
+      \          pythonComment,
+      \
+
+" Types
+syn region pythonList
+      \ matchgroup=pythonDelimiter
+      \ start='\['
+      \ end='\]'
+      \ contains=@pythonExpression,
+      \          pythonFunctionCall,
+      \          pythonString,pythonRawString,
+      \          pythonBytes,pythonRawBytes,
+      \          pythonFString,pythonRawFString,
+      \          pythonComment,
+      \
+
+" Types
+syn region pythonTuple
+      \ matchgroup=pythonDelimiter
+      \ start='('
+      \ end=')'
+      \ contains=@pythonExpression,
+      \          pythonFunctionCall,
+      \          pythonString,pythonRawString,
+      \          pythonBytes,pythonRawBytes,
+      \          pythonFString,pythonRawFString,
+      \          pythonComment,
+      \
+
+syn region pythonFuncSignature
+     \ start=/^\s*\%(async\s*\)\?def\>/
+     \ end=/:\s*$/
+     \ oneline keepend
+     \ contains=@pythonExpression,pythonComment,pythonTypeHint,pythonDict,pythonDelimiter,pythonColon,
+
+syn region pythonTypeHint start=/:/ end=/,\|)\|(\|\[\|\]\|=/ keepend contained containedin=pythonFuncSignature contains=pythonDelimiter,pythonOperator
+
+" Handle return type hints
 syn region pythonReturnTypeHint
       \ matchgroup=pythonArrowOperator
       \ start=/->/
       \ end=/\ze:/
-      \ containedin=ALLBUT,pythonString,pythonRawString,pythonComment,pythonBytes,pythonRawBytes,pythonFString,pythonRawFString
-      \ keepend
-syn match pythonTypeHint /\%(:\s*\)\@<=[^#=,()"'\[\]]\+/ containedin=ALLBUT,pythonString,pythonRawString,pythonComment,pythonBytes,pythonRawBytes,pythonFString,pythonRawFString display
+      \ containedin=pythonFuncSignature
+      \ contains=pythonBuiltinType,pythonClassName
 
 " Operators
 syn keyword pythonOperator and in is not or
@@ -83,28 +134,37 @@ syn region pythonString   start=+"+ skip=+\\\\\|\\"\|\\$+ excludenl end=+"+ end=
 syn region pythonString   start=+'''+ skip=+\\'+ end=+'''+ keepend contains=pythonBytesEscape,pythonBytesEscapeError,pythonUniEscape,pythonUniEscapeError,pythonDocTest,pythonSpaceError,@Spell
 syn region pythonString   start=+"""+ skip=+\\"+ end=+"""+ keepend contains=pythonBytesEscape,pythonBytesEscapeError,pythonUniEscape,pythonUniEscapeError,pythonDocTest2,pythonSpaceError,@Spell
 
-syn region pythonFString   start=+[fF]'+ skip=+\\\\\|\\'\|\\$+ excludenl end=+'+ end=+$+ keepend contains=pythonBytesEscape,pythonBytesEscapeError,pythonUniEscape,pythonUniEscapeError,@Spell
-syn region pythonFString   start=+[fF]"+ skip=+\\\\\|\\"\|\\$+ excludenl end=+"+ end=+$+ keepend contains=pythonBytesEscape,pythonBytesEscapeError,pythonUniEscape,pythonUniEscapeError,@Spell
-syn region pythonFString   start=+[fF]'''+ skip=+\\'+ end=+'''+ keepend contains=pythonBytesEscape,pythonBytesEscapeError,pythonUniEscape,pythonUniEscapeError,pythonDocTest,pythonSpaceError,@Spell
-syn region pythonFString   start=+[fF]"""+ skip=+\\"+ end=+"""+ keepend contains=pythonBytesEscape,pythonBytesEscapeError,pythonUniEscape,pythonUniEscapeError,pythonDocTest2,pythonSpaceError,@Spell
+" F-strings with prefix highlighting
+syn region pythonFString matchgroup=pythonStringPrefix start=+[fF]\z(['"]\)+ skip=+\\\\\|\\'\|\\$+ excludenl end=+'+ end=+$+ keepend contains=pythonBytesEscape,pythonBytesEscapeError,pythonUniEscape,pythonUniEscapeError,@Spell
+syn region pythonFString matchgroup=pythonStringPrefix start=+[fF]\z(["]\)+ skip=+\\\\\|\\"\|\\$+ excludenl end=+"+ end=+$+ keepend contains=pythonBytesEscape,pythonBytesEscapeError,pythonUniEscape,pythonUniEscapeError,@Spell
+syn region pythonFString matchgroup=pythonStringPrefix start=+[fF]\z('''\)+ skip=+\\'+ end=+'''+ keepend contains=pythonBytesEscape,pythonBytesEscapeError,pythonUniEscape,pythonUniEscapeError,pythonDocTest,pythonSpaceError,@Spell
+syn region pythonFString matchgroup=pythonStringPrefix start=+[fF]\z("""\)+ skip=+\\"+ end=+"""+ keepend contains=pythonBytesEscape,pythonBytesEscapeError,pythonUniEscape,pythonUniEscapeError,pythonDocTest2,pythonSpaceError,@Spell
 
-syn region pythonRawString  start=+[rR]'+ skip=+\\\\\|\\'\|\\$+ excludenl end=+'+ end=+$+ keepend contains=pythonRawEscape,@Spell
-syn region pythonRawString  start=+[rR]"+ skip=+\\\\\|\\"\|\\$+ excludenl end=+"+ end=+$+ keepend contains=pythonRawEscape,@Spell
-syn region pythonRawString  start=+[rR]'''+ skip=+\\'+ end=+'''+ keepend contains=pythonDocTest,pythonSpaceError,@Spell
-syn region pythonRawString  start=+[rR]"""+ skip=+\\"+ end=+"""+ keepend contains=pythonDocTest2,pythonSpaceError,@Spell
+" Raw strings with prefix highlighting
+syn region pythonRawString matchgroup=pythonStringPrefix start=+[rR]\z(['"]\)+ skip=+\\\\\|\\'\|\\$+ excludenl end=+'+ end=+$+ keepend contains=pythonRawEscape,@Spell
+syn region pythonRawString matchgroup=pythonStringPrefix start=+[rR]\z(["]\)+ skip=+\\\\\|\\"\|\\$+ excludenl end=+"+ end=+$+ keepend contains=pythonRawEscape,@Spell
+syn region pythonRawString matchgroup=pythonStringPrefix start=+[rR]\z('''\)+ skip=+\\'+ end=+'''+ keepend contains=pythonDocTest,pythonSpaceError,@Spell
+syn region pythonRawString matchgroup=pythonStringPrefix start=+[rR]\z("""\)+ skip=+\\"+ end=+"""+ keepend contains=pythonDocTest2,pythonSpaceError,@Spell
 
-syn region pythonRawFString   start=+\%([fF][rR]\|[rR][fF]\)'+ skip=+\\\\\|\\'\|\\$+ excludenl end=+'+ end=+$+ keepend contains=pythonRawEscape,@Spell
-syn region pythonRawFString   start=+\%([fF][rR]\|[rR][fF]\)"+ skip=+\\\\\|\\"\|\\$+ excludenl end=+"+ end=+$+ keepend contains=pythonRawEscape,@Spell
-syn region pythonRawFString   start=+\%([fF][rR]\|[rR][fF]\)'''+ skip=+\\'+ end=+'''+ keepend contains=pythonDocTest,pythonSpaceError,@Spell
-syn region pythonRawFString   start=+\%([fF][rR]\|[rR][fF]\)"""+ skip=+\\"+ end=+"""+ keepend contains=pythonDocTest,pythonSpaceError,@Spell
+" Raw F-strings with prefix highlighting
+syn region pythonRawFString matchgroup=pythonStringPrefix start=+\%([fF][rR]\|[rR][fF]\)\z(['"]\)+ skip=+\\\\\|\\'\|\\$+ excludenl end=+'+ end=+$+ keepend contains=pythonRawEscape,@Spell
+syn region pythonRawFString matchgroup=pythonStringPrefix start=+\%([fF][rR]\|[rR][fF]\)\z(["]\)+ skip=+\\\\\|\\"\|\\$+ excludenl end=+"+ end=+$+ keepend contains=pythonRawEscape,@Spell
+syn region pythonRawFString matchgroup=pythonStringPrefix start=+\%([fF][rR]\|[rR][fF]\)\z('''\)+ skip=+\\'+ end=+'''+ keepend contains=pythonDocTest,pythonSpaceError,@Spell
+syn region pythonRawFString matchgroup=pythonStringPrefix start=+\%([fF][rR]\|[rR][fF]\)\z("""\)+ skip=+\\"+ end=+"""+ keepend contains=pythonDocTest,pythonSpaceError,@Spell
 
-syn region pythonRawBytes  start=+\%([bB][rR]\|[rR][bB]\)'+ skip=+\\\\\|\\'\|\\$+ excludenl end=+'+ end=+$+ keepend contains=pythonRawEscape,@Spell
-syn region pythonRawBytes  start=+\%([bB][rR]\|[rR][bB]\)"+ skip=+\\\\\|\\"\|\\$+ excludenl end=+"+ end=+$+ keepend contains=pythonRawEscape,@Spell
-syn region pythonRawBytes  start=+\%([bB][rR]\|[rR][bB]\)'''+ skip=+\\'+ end=+'''+ keepend contains=pythonDocTest,pythonSpaceError,@Spell
-syn region pythonRawBytes  start=+\%([bB][rR]\|[rR][bB]\)"""+ skip=+\\"+ end=+"""+ keepend contains=pythonDocTest2,pythonSpaceError,@Spell
+" Bytes with prefix highlighting
+syn region pythonBytes matchgroup=pythonStringPrefix start=+[bB]\z(['"]\)+ skip=+\\\\\|\\'\|\\$+ excludenl end=+'+ end=+$+ keepend contains=pythonBytesError,pythonBytesContent,@Spell
+syn region pythonBytes matchgroup=pythonStringPrefix start=+[bB]\z(["]\)+ skip=+\\\\\|\\"\|\\$+ excludenl end=+"+ end=+$+ keepend contains=pythonBytesError,pythonBytesContent,@Spell
+syn region pythonBytes matchgroup=pythonStringPrefix start=+[bB]\z('''\)+ skip=+\\'+ end=+'''+ keepend contains=pythonBytesError,pythonBytesContent,pythonDocTest,pythonSpaceError,@Spell
+syn region pythonBytes matchgroup=pythonStringPrefix start=+[bB]\z("""\)+ skip=+\\"+ end=+"""+ keepend contains=pythonBytesError,pythonBytesContent,pythonDocTest2,pythonSpaceError,@Spell
+
+" Raw bytes with prefix highlighting
+syn region pythonRawBytes matchgroup=pythonStringPrefix start=+\%([bB][rR]\|[rR][bB]\)\z(['"]\)+ skip=+\\\\\|\\'\|\\$+ excludenl end=+'+ end=+$+ keepend contains=pythonRawEscape,@Spell
+syn region pythonRawBytes matchgroup=pythonStringPrefix start=+\%([bB][rR]\|[rR][bB]\)\z(["]\)+ skip=+\\\\\|\\"\|\\$+ excludenl end=+"+ end=+$+ keepend contains=pythonRawEscape,@Spell
+syn region pythonRawBytes matchgroup=pythonStringPrefix start=+\%([bB][rR]\|[rR][bB]\)\z('''\)+ skip=+\\'+ end=+'''+ keepend contains=pythonDocTest,pythonSpaceError,@Spell
+syn region pythonRawBytes matchgroup=pythonStringPrefix start=+\%([bB][rR]\|[rR][bB]\)\z("""\)+ skip=+\\"+ end=+"""+ keepend contains=pythonDocTest2,pythonSpaceError,@Spell
 
 syn match pythonRawEscape +\\['"]+ display contained
-
 syn match pythonStrFormatting '%\%(([^)]\+)\)\=[-#0 +]*\d*\%(\.\d\+\)\=[hlL]\=[diouxXeEfFgGcrs%]' contained containedin=pythonString,pythonRawString,pythonBytesContent
 syn match pythonStrFormatting '%[-#0 +]*\%(\*\|\d\+\)\=\%(\.\%(\*\|\d\+\)\)\=[hlL]\=[diouxXeEfFgGcrs%]' contained containedin=pythonString,pythonRawString,pythonBytesContent
 
@@ -118,7 +178,6 @@ syn match pythonStrFormat "{{\|}}" contained containedin=pythonFString,pythonRaw
 syn match pythonStrTemplate '\$\$' contained containedin=pythonString,pythonRawString
 syn match pythonStrTemplate '\${[a-zA-Z_][a-zA-Z0-9_]*}' contained containedin=pythonString,pythonRawString
 syn match pythonStrTemplate '\$[a-zA-Z_][a-zA-Z0-9_]*' contained containedin=pythonString,pythonRawString
-
 
 " Numbers (ints, longs, floats, complex)
 syn match   pythonOctError    '\<0[oO]\=\o*\D\+\d*\>' display
@@ -150,8 +209,9 @@ syn match   pythonFloat       '\<\d\%([_0-9]*\d\)\=\.\d\=\%([_0-9]*\d\)\=\%([eE]
 syn keyword pythonNone        None
 syn keyword pythonBoolean     True False
 syn keyword pythonSingleton   Ellipsis NotImplemented
-syn keyword pythonBuiltinObj  __debug__ __doc__ __file__ __name__ __package__
-syn keyword pythonBuiltinObj  __loader__ __spec__ __path__ __cached__
+syn keyword pythonBuiltinAttr  __debug__ __doc__ __file__ __name__ __package__
+syn keyword pythonBuiltinAttr  __loader__ __spec__ __path__ __cached__
+syn region pythonDunder start=/__/ end=/__/ contained containedin=pythonDottedName, pythonString,pythonRawString,pythonComment,pythonBytes,pythonRawBytes,pythonFString,pythonRawFString
 
 
 " Builtin exceptions and warnings
@@ -161,10 +221,6 @@ let s:exs_re .= '|BlockingIOError|ChildProcessError|ConnectionError|BrokenPipeEr
 
 execute 'syn match pythonExClass ''\v\.@<!\zs<%(' . s:exs_re . ')>'''
 unlet s:exs_re
-
-" Delimiters
-syn match pythonDelimiter /[}{\[\](),]/
-syn match pythonColon /:/ containedin=ALLBUT,pythonString,pythonRawString,pythonComment,pythonBytes,pythonRawBytes,pythonFString,pythonRawFString display
 
 hi link pythonStatement        Statement
 hi link pythonRaiseFromStatement   Statement
@@ -194,10 +250,11 @@ hi link pythonSpaceError       Error
 
 hi link pythonString           String
 hi link pythonRawString        String
-hi link pythonRawEscape        Special
+hi link pythonRawEscape        Constant
+hi link pythonBytesEscape      Constant
 
-hi link pythonUniEscape        Special
-hi link pythonUniEscapeError   Error 
+hi link pythonUniEscape        Constant
+hi link pythonUniEscapeError   Error
 
 hi link pythonStrFormatting    Special
 hi link pythonStrFormat        Special
@@ -216,7 +273,8 @@ hi link pythonBinError         Error
 hi link pythonBoolean          Boolean
 hi link pythonNone             Constant
 hi link pythonSingleton        Constant
-hi link pythonBuiltinObj       Constant
+hi link pythonBuiltinAttr      Constant
+hi link pythonDunder           Constant
 
 hi link pythonExClass          Structure
 hi link pythonClass            Structure
@@ -226,4 +284,9 @@ hi link pythonTypeHint     Type
 hi link pythonReturnTypeHint Type
 hi link pythonDot Delimiter
 
+hi link pythonAttr Identifier
+
+hi link pythonStringPrefix Constant
+
 let b:current_syntax = 'python'
+
