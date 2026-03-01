@@ -29,7 +29,7 @@ syn match pythonStatement '\<async\s\+def\>' contained containedin=pythonFuncSig
 syn cluster pythonExpression contains=pythonStatement,pythonRepeat,pythonConditional,pythonOperator,pythonNumber,pythonHexNumber,pythonOctNumber,pythonBinNumber,pythonFloat,pythonString,pythonFString,pythonRawString,pythonRawFString,pythonBytes,pythonBoolean,pythonNone,pythonSingleton,pythonBuiltinAttr,pythonBuiltinFunc,pythonBuiltinType,pythonClassVar,pythonFunctionCall,pythonDelimiter
 
 
-syn match pythonAttr '\%(\.\)\@<=\%([^[:cntrl:][:space:][:punct:][:digit:]]\|_\)\%([^[:cntrl:][:punct:][:space:]]\|_\)*\%(\s*(\)\@!' contained containedin=ALLBUT,pythonString,pythonRawString,pythonComment,pythonBytes,pythonRawBytes,pythonFString,pythonRawFString,pythonImport
+"syn match pythonAttr '\%(\.\)\@<=\%([^[:cntrl:][:space:][:punct:][:digit:]]\|_\)\%([^[:cntrl:][:punct:][:space:]]\|_\)*\%(\s*(\)\@!' contained containedin=ALLBUT,pythonString,pythonRawString,pythonComment,pythonBytes,pythonRawBytes,pythonFString,pythonRawFString,pythonImport
 
 " Types
 syn region pythonDict
@@ -44,7 +44,6 @@ syn region pythonDict
       \          pythonComment,
       \
 
-" Types
 syn region pythonList
       \ matchgroup=pythonDelimiter
       \ start='\['
@@ -57,7 +56,6 @@ syn region pythonList
       \          pythonComment,
       \
 
-" Types
 syn region pythonTuple
       \ matchgroup=pythonDelimiter
       \ start='('
@@ -73,8 +71,8 @@ syn region pythonTuple
 syn region pythonFuncSignature
      \ start=/^\s*\%(async\s*\)\?def\>/
      \ end=/:\s*$/
-     \ oneline keepend
-     \ contains=@pythonExpression,pythonComment,pythonTypeHint,pythonDict,pythonDelimiter,pythonColon,
+     \ keepend
+     \ contains=@pythonExpression,pythonComment,pythonTypeHint,pythonDict,pythonDelimiter,pythonColon
 
 syn region pythonTypeHint start=/:/ end=/,\|)\|(\|\[\|\]\|=/ keepend contained containedin=pythonFuncSignature contains=pythonDelimiter,pythonOperator
 
@@ -284,7 +282,7 @@ hi link pythonTypeHint     Type
 hi link pythonReturnTypeHint Type
 hi link pythonDot Delimiter
 
-hi link pythonAttr Identifier
+"hi link pythonAttr Identifier
 
 hi link pythonStringPrefix Constant
 
