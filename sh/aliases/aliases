@@ -12,6 +12,17 @@ alias pt="setxkbmap -model abnt2 -layout br -variant abnt2"
 alias en="setxkbmap -layout us -variant intl"
 alias src="source $HOME/.bashrc"
 
+function mv() {
+    local target="${@: -1}"
+    if [[ -d "$target" ]]; then
+        dir="$target"
+    else
+        dir=$(dirname "$target")
+    fi
+    mkdir -p "$dir"
+    command mv "$@"
+}
+
 function cp(){
     if [[ ${#@} -eq 0 ]]; then
         xclip -selection clipboard
@@ -20,18 +31,47 @@ function cp(){
             cat "$1" | xclip -selection clipboard
         fi
     else
+        local target="${@: -1}"
+        if [[ -d "$target" ]]; then
+            dir="$target"
+        else
+            dir=$(dirname "$target")
+        fi
+        mkdir -p "$dir"
         command cp -r "$@"
     fi
 }
 
-function bc(){
-    echo "Welcome to bc calculator. Type \"quit\" to exit."
-    command bc -q -i -l $@
+function bc() {
+    if ! command -v bc > /dev/null 2>&1; then
+        echo "Error: missing bc."
+        exit 1
+    fi
+    if [ $# -eq 0 ]; then
+        echo "Welcome to bc calculator. Type \"quit\" to exit."
+        command bc -q -i -l
+    else
+        local expression=""
+        for arg in "$@"; do
+            if [ -n "$expression" ]; then
+                expression="$expression $arg"
+            else
+                expression="$arg"
+            fi
+        done
+        
+        if [ -f "$1" ] && [ $# -eq 1 ]; then
+            command bc -l "$@"
+        else
+            echo "$expression" | command bc -l
+        fi
+    fi
 }
+
 
 function random(){
     var=$(tr -dc A-Za-z0-9 </dev/urandom | head -c $1)
-    echo $var | xclip -selection clipboard
+    echo -n $var | xclip -selection clipboard
 }
 
 function localhost(){
