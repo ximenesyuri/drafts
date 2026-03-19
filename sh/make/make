@@ -1,0 +1,223 @@
+#! /bin/bash
+
+make() {
+    local root_dir="$PWD"
+    local cwd="$PWD"
+
+    while [ "$root_dir" != "/" ]; do
+        if [ -f "$root_dir/Makefile" ] || [ -f "$root_dir/makefile" ]; then
+            break
+        fi
+        root_dir=$(dirname "$root_dir")
+    done
+
+    if [ "$root_dir" = "/" ] && [ ! -f "/Makefile" ] && [ ! -f "/makefile" ]; then
+        root_dir="$cwd"
+    fi
+
+    cd "$root_dir" || return 1
+    command make "$@"
+    cd "$cwd" || return 1
+}
+
+
+_make_completion() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+
+    local dir=$PWD mkfile=""
+    while :; do
+        for name in GNUmakefile makefile Makefile; do
+            if [[ -f "$dir/$name" ]]; then
+                mkfile="$dir/$name"
+                break 2
+            fi
+        done
+        [[ "$dir" == "/" ]] && break
+        dir=${dir%/*}
+        [[ -z "$dir" ]] && dir="/"
+    done
+    [[ -z "$mkfile" ]] && return
+
+    local targets
+    targets=$(
+        awk '
+            /^[^ \t#].*:/ {
+                sub(/:.*/, "", $0);
+                print $0
+            }
+        ' "$mkfile" 2>/dev/null \
+        | grep -vE '^_' \
+        | grep -vE '%' \
+        | sort -u
+    )
+
+    if (( COMP_CWORD == 1 )); then
+        COMPREPLY=( $(compgen -W "$targets" -- "$cur") )
+        return
+    fi
+
+    local main_target="" i
+    for ((i=1; i<COMP_CWORD; i++)); do
+        case "${COMP_WORDS[i]}" in
+            -*|*=*) ;;
+            *) main_target=${COMP_WORDS[i]}; break ;;
+        esac
+    done
+
+    if [[ -z $main_target ]]; then
+        COMPREPLY=( $(compgen -W "$targets" -- "$cur") )
+        return
+    fi
+
+    declare -A func_arg_uses
+    local in_define=0 def_name="" def_body=""
+
+    while IFS= read -r line; do
+        if (( ! in_define )); then
+            case "$line" in
+                define[[:space:]]*)
+                    def_name=${line#define}
+                    def_name=${def_name##[[:space:]]}
+                    def_name=${def_name%%[[:space:]]*}
+                    if [[ -n $def_name ]]; then
+                        in_define=1
+                        def_body=""
+                    fi
+                    ;;
+            esac
+        else
+            case "$line" in
+                endef)
+                    local body="$def_body" used=""
+                    while :; do
+                        case "$body" in
+                            *'$('*)
+                                body=${body#*'$('}
+                                local num=${body%%')'*}
+                                if [[ $num =~ ^[0-9]+$ ]]; then
+                                    [[ " $used " == *" $num "* ]] || used+=" $num"
+                                fi
+                                body=${body#*')'}
+                                ;;
+                            *)
+                                break
+                                ;;
+                        esac
+                    done
+                    used=${used## }
+                    [[ -n $used ]] && func_arg_uses["$def_name"]="$used"
+                    in_define=0
+                    def_name=""
+                    def_body=""
+                    ;;
+                *)
+                    def_body+=$'\n'"$line"
+                    ;;
+            esac
+        fi
+    done < "$mkfile"
+
+    local in_target=0 recipe=""
+    while IFS= read -r line; do
+        if [[ $line =~ ^([^[:space:]#][^:#]*): ]]; then
+            local t=${line%%:*}
+            t=${t%%[[:space:]]*}
+            if [[ $t == "$main_target" ]]; then
+                in_target=1
+                recipe=""
+            else
+                in_target=0
+            fi
+            continue
+        fi
+        if (( in_target )) && [[ $line == $'\t'* ]]; then
+            recipe+=$'\n'"${line#$'\t'}"
+        fi
+    done < "$mkfile"
+
+    [[ -z $recipe ]] && return
+
+    declare -A params_needed
+
+    while IFS= read -r line; do
+        local rest="$line"
+        while [[ "$rest" == *"\$(call"* ]]; do
+            local prefix=${rest%%"\$(call"*}
+            rest=${rest#*"\$(call"}
+
+            local call_text="" depth=1 c
+            local i
+            for ((i=0; i<${#rest}; i++)); do
+                c=${rest:i:1}
+                call_text+="$c"
+                if [[ $c == '(' ]]; then
+                    ((depth++))
+                elif [[ $c == ')' ]]; then
+                    ((depth--))
+                    if (( depth == 0 )); then
+                        break
+                    fi
+                fi
+            done
+
+            (( depth != 0 )) && break
+
+            rest=${rest#"$call_text"}
+
+            while [[ $call_text == [[:space:]]* ]]; do call_text=${call_text#?}; done
+
+            local fname="$call_text"
+            fname=${fname%%,*}
+            fname=${fname%%[[:space:]]*}
+            [[ -z $fname ]] && continue
+
+            local after=${call_text#"$fname"}
+            after=${after#*,}
+            after=${after%')'}
+            local args_part="$after"
+
+            IFS=',' read -r -a args <<< "$args_part"
+
+            local used="${func_arg_uses[$fname]}"
+            local j
+            for ((j=0; j<${#args[@]}; j++)); do
+                local a="${args[j]}"
+
+                while [[ $a == [[:space:]]* ]]; do a=${a#?}; done
+                while [[ $a == *[[:space:]] ]]; do a=${a%?}; done
+
+                local varname=""
+                if [[ $a == '$('*')' ]]; then
+                    varname=${a#'$('}; varname=${varname%')'}
+                elif [[ $a == '${'*'}' ]]; then
+                    varname=${a#'${'}; varname=${varname%'}'}
+                fi
+                [[ -z $varname ]] && continue
+                [[ $varname =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+
+                local pos=$((j+1))
+
+                if [[ -n $used ]]; then
+                    case " $used " in
+                        *" $pos "*) params_needed["$varname"]=1 ;;
+                    esac
+                else
+                    params_needed["$varname"]=1
+                fi
+            done
+        done
+    done <<< "$recipe"
+
+    [[ ${#params_needed[@]} -eq 0 ]] && return
+
+    local suggestions=()
+    local v
+    for v in "${!params_needed[@]}"; do
+        suggestions+=( "${v}=" )
+    done
+
+    COMPREPLY=( $(compgen -W "${suggestions[*]}" -- "$cur") )
+}
+
+complete -F _make_completion make
+
