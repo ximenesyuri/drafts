@@ -6,7 +6,7 @@ if [[ $- == *i* ]]; then
   __ML_PREFIX="  > "
   __ML_PLEN=${#__ML_PREFIX}
 
-  __ml_set_normal_keys() {
+__ml_set_normal_keys() {
     bind '"\C-m": accept-line'
     bind '"\e[A": previous-history'
     bind '"\e[B": next-history'
@@ -21,39 +21,37 @@ if [[ $- == *i* ]]; then
     bind '"\C-?": backward-delete-char'
     bind '"\C-d": delete-char'
     bind '"\e[3~": delete-char'
-  }
+  } 
 
   # ---- helpers on current line ----
 
-  __ml_current_line_bounds() {
-    # computes __ml_line_start, __ml_line_end for position $1 or READLINE_POINT
-    local buf=$READLINE_LINE
-    local pos=${1:-$READLINE_POINT}
-    local len=${#buf}
-    local i last_nl=-1
-    for ((i=0; i<pos; i++)); do
-      [[ ${buf:i:1} == $'\n' ]] && last_nl=$i
-    done
-    __ml_line_start=$(( last_nl + 1 ))
-    local nl=-1
-    for ((i=__ml_line_start; i<len; i++)); do
-      if [[ ${buf:i:1} == $'\n' ]]; then
-        nl=$i
-        break
-      fi
-    done
-    __ml_line_end=$(( nl == -1 ? len : nl ))
-  }
-
-  __ml_line_is_prefixed() {
-    # returns 0 if this line (start at $1) has the "  > " prefix and is NOT the first line
-    local start=$1
-    if (( start == 0 )); then
-      return 1
+ __ml_current_line_bounds() {
+  # computes __ml_line_start, __ml_line_end for position $1 or READLINE_POINT
+  local buf=$READLINE_LINE
+  local pos=${1:-$READLINE_POINT}
+  local len=${#buf}
+  local i last_nl=-1
+  for ((i=0; i<pos; i++)); do
+    [[ ${buf:i:1} == $'\n' ]] && last_nl=$i
+  done
+  __ml_line_start=$(( last_nl + 1 ))
+  local nl=-1
+  for ((i=__ml_line_start; i<len; i++)); do
+    if [[ ${buf:i:1} == $'\n' ]]; then
+      nl=$i
+      break
     fi
-    [[ ${READLINE_LINE:start:__ML_PLEN} == "$__ML_PREFIX" ]]
-  }
-
+  done
+  __ml_line_end=$(( nl == -1 ? len : nl ))
+}
+__ml_line_is_prefixed() {
+  # returns 0 if this line (start at $1) has the "  > " prefix and is NOT the first line
+  local start=$1
+  if (( start == 0 )); then
+    return 1
+  fi
+  [[ ${READLINE_LINE:start:__ML_PLEN} == "$__ML_PREFIX" ]]
+} 
   # ---- core editing primitives ----
 
   __ml_newline() {
@@ -65,73 +63,71 @@ if [[ $- == *i* ]]; then
     (( READLINE_POINT += ${#insert} ))
   }
 
-  __ml_up() {
+    __ml_up() {
     [[ $__ML_MODE -eq 1 ]] || return
-    local buf=$READLINE_LINE pos=$READLINE_POINT len=${#buf}
 
-    # current line start and column
-    local i last_nl=-1
-    for ((i=0; i<pos; i++)); do
-      [[ ${buf:i:1} == $'\n' ]] && last_nl=$i
-    done
-    local cur_start=$(( last_nl + 1 ))
+    local buf=$READLINE_LINE
+    local pos=$READLINE_POINT
+    local len=${#buf}
+
+    # Get current line bounds and column
+    __ml_current_line_bounds "$pos"
+    local cur_start=$__ml_line_start
+    local cur_end=$__ml_line_end
     local col=$(( pos - cur_start ))
 
-    (( last_nl == -1 )) && return  # already at first line
+    # If already on the first line, nothing to do
+    (( cur_start == 0 )) && return
 
-    # previous line start
-    local prev_nl=-1
-    for ((i=0; i<last_nl; i++)); do
+    # Previous line end is the newline just before cur_start
+    local prev_end=$(( cur_start - 1 ))  # index of '\n' ending previous line
+
+    # Find previous line start (newline before prev_end, or 0)
+    local i prev_nl=-1
+    for ((i=0; i<prev_end; i++)); do
       [[ ${buf:i:1} == $'\n' ]] && prev_nl=$i
     done
     local prev_start=$(( prev_nl + 1 ))
 
-    # previous line end
-    local next_nl=-1
-    for ((i=prev_start; i<len; i++)); do
-      if [[ ${buf:i:1} == $'\n' ]]; then
-        next_nl=$i
-        break
-      fi
-    done
-    local prev_end=$(( next_nl == -1 ? len : next_nl ))
+    # Length of previous line (number of characters, excluding its '\n')
+    local prev_len=$(( prev_end - prev_start ))
 
-    local new_pos=$(( prev_start + col ))
+    # Desired column on previous line
+    local target_col=$col
 
+    # Enforce prefix on prefixed lines
     if __ml_line_is_prefixed "$prev_start"; then
-      local min_pos=$(( prev_start + __ML_PLEN ))
-      (( new_pos < min_pos )) && new_pos=$min_pos
+      local min_col=$__ML_PLEN
+      (( target_col < min_col )) && target_col=$min_col
     fi
-    (( new_pos > prev_end )) && new_pos=$prev_end
-    READLINE_POINT=$new_pos
+
+    # Clamp to end of previous line
+    (( target_col > prev_len )) && target_col=$prev_len
+
+    READLINE_POINT=$(( prev_start + target_col ))
   }
 
   __ml_down() {
     [[ $__ML_MODE -eq 1 ]] || return
-    local buf=$READLINE_LINE pos=$READLINE_POINT len=${#buf}
 
-    # current line start and column
-    local i last_nl=-1
-    for ((i=0; i<pos; i++)); do
-      [[ ${buf:i:1} == $'\n' ]] && last_nl=$i
-    done
-    local cur_start=$(( last_nl + 1 ))
+    local buf=$READLINE_LINE
+    local pos=$READLINE_POINT
+    local len=${#buf}
+
+    # Get current line bounds and column
+    __ml_current_line_bounds "$pos"
+    local cur_start=$__ml_line_start
+    local cur_end=$__ml_line_end
     local col=$(( pos - cur_start ))
 
-    # find next line start
-    local nl=-1
-    for ((i=pos; i<len; i++)); do
-      if [[ ${buf:i:1} == $'\n' ]]; then
-        nl=$i
-        break
-      fi
-    done
-    (( nl == -1 )) && return  # already last line
+    # If already on the last line, nothing to do
+    (( cur_end >= len )) && return
 
-    local next_start=$(( nl + 1 ))
+    # Next line starts right after current line's '\n'
+    local next_start=$(( cur_end + 1 ))
 
-    # next line end
-    local next_nl=-1
+    # Find next line end (next '\n' or end of buffer)
+    local i next_nl=-1
     for ((i=next_start; i<len; i++)); do
       if [[ ${buf:i:1} == $'\n' ]]; then
         next_nl=$i
@@ -140,15 +136,23 @@ if [[ $- == *i* ]]; then
     done
     local next_end=$(( next_nl == -1 ? len : next_nl ))
 
-    local new_pos=$(( next_start + col ))
+    # Length of next line (excluding its '\n')
+    local next_len=$(( next_end - next_start ))
 
+    # Desired column on next line
+    local target_col=$col
+
+    # Enforce prefix on prefixed lines
     if __ml_line_is_prefixed "$next_start"; then
-      local min_pos=$(( next_start + __ML_PLEN ))
-      (( new_pos < min_pos )) && new_pos=$min_pos
+      local min_col=$__ML_PLEN
+      (( target_col < min_col )) && target_col=$min_col
     fi
-    (( new_pos > next_end )) && new_pos=$next_end
-    READLINE_POINT=$new_pos
-  }
+
+    # Clamp to end of next line
+    (( target_col > next_len )) && target_col=$next_len
+
+    READLINE_POINT=$(( next_start + target_col ))
+  } 
 
   __ml_backspace() {
     [[ $__ML_MODE -eq 1 ]] || return
@@ -205,23 +209,27 @@ if [[ $- == *i* ]]; then
     READLINE_POINT=$new_pos
   }
 
-  __ml_set_multiline_keys() {
-    bind -x '"\C-m": __ml_newline'   # Enter: newline with "  > "
-    bind -x '"\e[A": __ml_up'        # Up: prev line
-    bind -x '"\e[B": __ml_down'      # Down: next line
+__ml_set_multiline_keys() {
+  bind -x '"\C-m": __ml_newline'   # Enter: newline with "  > "
 
-    bind -x '"\C-h": __ml_backspace' # Backspace
-    bind -x '"\C-?": __ml_backspace'
-    bind -x '"\C-d": __ml_delete'    # Delete
-    bind -x '"\e[3~": __ml_delete'
+  # Up/Down: bind both CSI and SS3 variants
+  bind -x '"\e[A": __ml_up'        # ^[[A
+  bind -x '"\e[B": __ml_down'      # ^[[B
+  bind -x '"\eOA": __ml_up'        # ^[OA (some terms/tmux)
+  bind -x '"\eOB": __ml_down'      # ^[OB
 
-    bind -x '"\e[D": __ml_left'      # Left: stay out of prefix
-    bind -x '"\eOD": __ml_left'
-    # Right is left as normal forward-char
+  bind -x '"\C-h": __ml_backspace'
+  bind -x '"\C-?": __ml_backspace'
+  bind -x '"\C-d": __ml_delete'
+  bind -x '"\e[3~": __ml_delete'
 
-    bind -x '"\e": __ml_escape'
-  }
+  bind -x '"\e[D": __ml_left'
+  bind -x '"\eOD": __ml_left'
 
+  # IMPORTANT: do *not* bind bare ESC here; leave it as prefix-meta
+  # If you want an exit key, use something like:
+  # bind -x '"\C-g": __ml_escape'
+}
   # ---- join & execute / escape ----
 
   __ml_strip_prefixes_and_join() {
