@@ -20,7 +20,6 @@ make() {
     cd "$cwd" || return 1
 }
 
-
 _make_completion() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
 
@@ -38,6 +37,11 @@ _make_completion() {
     done
     [[ -z "$mkfile" ]] && return
 
+    #
+    # Collect targets, but skip:
+    #   - ones starting with '.' (special targets)
+    #   - ones that are ALL UPPERCASE
+    #
     local targets
     targets=$(
         awk '
@@ -46,16 +50,51 @@ _make_completion() {
                 print $0
             }
         ' "$mkfile" 2>/dev/null \
-        | grep -vE '^_' \
-        | grep -vE '%' \
+        | sort -u \
+        | while IFS= read -r t; do
+              # skip if starts with dot
+              [[ $t == .* ]] && continue
+              # skip if ALL UPPERCASE (no lowercase chars and has at least one letter)
+              if [[ $t == *[A-Za-z]* && $t != *[a-z]* ]]; then
+                  continue
+              fi
+              printf "%s\n" "$t"
+          done
+    )
+
+    #
+    # Collect top-level variable names to suggest as var=
+    #
+    local vars
+    vars=$(
+        awk '
+            /^[^ \t#]/ {
+                if (match($0, /^([A-Za-z0-9_.-]+)[[:space:]]*(:?=|\?=|\+=)/, m)) {
+                    name = m[1]
+                    if (name ~ /^[._]/) next
+                    print name
+                }
+            }
+        ' "$mkfile" 2>/dev/null \
         | sort -u
     )
 
+    # Filter out ALL-UPPERCASE names; keep ones with at least one lowercase
+    local filtered_vars=()
+    local v
+    while IFS= read -r v; do
+        [[ -z "$v" ]] && continue
+        [[ "$v" == *[a-z]* ]] || continue
+        filtered_vars+=("$v")
+    done <<< "$vars"
+
+    # If first non-option word: offer targets
     if (( COMP_CWORD == 1 )); then
         COMPREPLY=( $(compgen -W "$targets" -- "$cur") )
         return
     fi
 
+    # Determine main target
     local main_target="" i
     for ((i=1; i<COMP_CWORD; i++)); do
         case "${COMP_WORDS[i]}" in
@@ -68,6 +107,8 @@ _make_completion() {
         COMPREPLY=( $(compgen -W "$targets" -- "$cur") )
         return
     fi
+
+    # --- from here down is your original $(call ...) / recipe logic ---
 
     declare -A func_arg_uses
     local in_define=0 def_name="" def_body=""
@@ -208,12 +249,24 @@ _make_completion() {
         done
     done <<< "$recipe"
 
-    [[ ${#params_needed[@]} -eq 0 ]] && return
+    [[ ${#params_needed[@]} -eq 0 && ${#filtered_vars[@]} -eq 0 ]] && return
 
     local suggestions=()
-    local v
-    for v in "${!params_needed[@]}"; do
-        suggestions+=( "${v}=" )
+    local name
+
+    for name in "${!params_needed[@]}"; do
+        suggestions+=( "${name}=" )
+    done
+
+    for name in "${filtered_vars[@]}"; do
+        local already=0
+        for v in "${suggestions[@]}"; do
+            if [[ "$v" == "$name=" ]]; then
+                already=1
+                break
+            fi
+        done
+        (( already )) || suggestions+=( "${name}=" )
     done
 
     COMPREPLY=( $(compgen -W "${suggestions[*]}" -- "$cur") )
