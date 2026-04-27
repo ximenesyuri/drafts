@@ -16,7 +16,7 @@ make() {
     fi
 
     cd "$root_dir" || return 1
-    command make "$@"
+    command make -s "$@"
     cd "$cwd" || return 1
 }
 

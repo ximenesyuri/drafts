@@ -1,6 +1,6 @@
 #!/bin/bash
 
-alias rm="rm -r"
+alias rm="rm -rf"
 alias md="mkdir -p"
 alias mf="touch"
 alias ls="ls --color=auto --group-directories-first"
