@@ -37,11 +37,6 @@ _make_completion() {
     done
     [[ -z "$mkfile" ]] && return
 
-    #
-    # Collect targets, but skip:
-    #   - ones starting with '.' (special targets)
-    #   - ones that are ALL UPPERCASE
-    #
     local targets
     targets=$(
         awk '
@@ -52,9 +47,7 @@ _make_completion() {
         ' "$mkfile" 2>/dev/null \
         | sort -u \
         | while IFS= read -r t; do
-              # skip if starts with dot
               [[ $t == .* ]] && continue
-              # skip if ALL UPPERCASE (no lowercase chars and has at least one letter)
               if [[ $t == *[A-Za-z]* && $t != *[a-z]* ]]; then
                   continue
               fi
@@ -62,9 +55,6 @@ _make_completion() {
           done
     )
 
-    #
-    # Collect top-level variable names to suggest as var=
-    #
     local vars
     vars=$(
         awk '
@@ -79,7 +69,6 @@ _make_completion() {
         | sort -u
     )
 
-    # Filter out ALL-UPPERCASE names; keep ones with at least one lowercase
     local filtered_vars=()
     local v
     while IFS= read -r v; do
@@ -88,7 +77,6 @@ _make_completion() {
         filtered_vars+=("$v")
     done <<< "$vars"
 
-    # If first non-option word: offer targets
     if (( COMP_CWORD == 1 )); then
         COMPREPLY=( $(compgen -W "$targets" -- "$cur") )
         return
@@ -107,8 +95,6 @@ _make_completion() {
         COMPREPLY=( $(compgen -W "$targets" -- "$cur") )
         return
     fi
-
-    # --- from here down is your original $(call ...) / recipe logic ---
 
     declare -A func_arg_uses
     local in_define=0 def_name="" def_body=""
